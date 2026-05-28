@@ -1,0 +1,601 @@
+/** views/profile_test.js — 메뉴 [2] AI Profile Test (2 탭, 상하구조). */
+(function () {
+  let chartInstance = null;
+
+  async function render() {
+    const main = document.getElementById("main");
+    main.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "view-title";
+    title.innerHTML = `<h1>AI Profile Test</h1>
+      <span class="sub">생성된 AI Profile 조회 + 동일 프롬프트의 응답 속도 비교.</span>`;
+    main.appendChild(title);
+
+    // Profile 데이터 한번 로드 후 두 탭에서 공유
+    let profiles = [];
+    try {
+      profiles = await window.API.get("/api/profiles");
+    } catch (e) {
+      const msg = errMsg(e, "Profile 목록 로드 실패");
+      main.appendChild(div(`<div class="empty-state muted">${msg}</div>`));
+      return;
+    }
+
+    const tabs = window.Tabs.create([
+      { id: "list", label: "1. Profile 목록 / 속성", render: (host) => renderTab1(host, profiles) },
+      { id: "bench", label: "2. 속도 측정 및 비교", render: (host) => renderTab2(host, profiles) },
+    ]);
+    main.appendChild(tabs);
+  }
+
+  // --- Tab 1 ---
+  async function renderTab1(host, profiles) {
+    host.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "split-vert";
+    host.appendChild(wrap);
+
+    const topPanel = document.createElement("div");
+    topPanel.className = "panel";
+    topPanel.innerHTML = `
+      <div class="panel-header">
+        <h2>Profile 목록</h2>
+        <button class="btn btn-ghost" id="pt-refresh">↻ 새로고침</button>
+      </div>
+      <div class="panel-body" id="pt-list"></div>
+    `;
+    wrap.appendChild(topPanel);
+
+    const bottomPanel = document.createElement("div");
+    bottomPanel.className = "panel";
+    bottomPanel.innerHTML = `
+      <div class="panel-header">
+        <h2 id="pt-attr-title">Profile 속성</h2>
+        <button class="btn btn-primary" id="pt-gen-sql" disabled>AI Profile 구문 생성</button>
+      </div>
+      <div class="panel-body" id="pt-attr">
+        <div class="empty-state muted">상단에서 Profile 을 선택하세요</div>
+      </div>
+    `;
+    wrap.appendChild(bottomPanel);
+
+    // 현재 선택된 Profile / 속성 — 헤더 버튼이 참조
+    let currentProfileName = null;
+    let currentAttrs = [];
+    document.getElementById("pt-gen-sql").addEventListener("click", () => {
+      if (!currentProfileName) return;
+      const sql = buildCreateProfileSql(currentProfileName, currentAttrs);
+      showSqlModal(`CREATE PROFILE — ${currentProfileName}`, sql);
+    });
+
+    function renderList() {
+      const list = document.getElementById("pt-list");
+      list.innerHTML = "";
+      const table = window.SimpleTable.create(
+        [
+          { key: "profile_name", label: "Profile Name" },
+          { key: "status",       label: "Status",
+            format: (v) => {
+              const span = document.createElement("span");
+              span.className = "badge " + (v === "ENABLED" ? "ok" : "disabled");
+              span.textContent = v;
+              return span;
+            }},
+          { key: "description",  label: "Description" },
+          { key: "_test", label: "", headerAlign: "center",
+            format: (_v, row) => {
+              const btn = document.createElement("button");
+              btn.className = "btn-ai-test";
+              btn.textContent = "AI Test";
+              btn.disabled = row.status !== "ENABLED";
+              btn.addEventListener("click", (e) => {
+                e.stopPropagation();  // 행 선택(속성 로드) 이벤트와 분리
+                openProfileTestModal(row.profile_name);
+              });
+              return btn;
+            }},
+        ],
+        profiles,
+        {
+          onRowClick: async (row, tr) => {
+            list.querySelectorAll("tr.selected").forEach((el) => el.classList.remove("selected"));
+            tr.classList.add("selected");
+            document.getElementById("pt-attr-title").textContent = `속성 - ${row.profile_name}`;
+            const genBtn = document.getElementById("pt-gen-sql");
+            genBtn.disabled = true;
+            const attrHost = document.getElementById("pt-attr");
+            attrHost.innerHTML = '<div class="empty-state"><span class="spinner"></span> 조회 중...</div>';
+            try {
+              const attrs = await window.API.get(`/api/profiles/${encodeURIComponent(row.profile_name)}/attributes`);
+              currentProfileName = row.profile_name;
+              currentAttrs = attrs;
+              attrHost.innerHTML = "";
+              attrHost.appendChild(window.SimpleTable.create(
+                [
+                  { key: "attribute_name", label: "Attribute" },
+                  {
+                    key: "attribute_value",
+                    label: "Value",
+                    format: (_v, attr) => buildEditableValueCell(row.profile_name, attr),
+                  },
+                ],
+                attrs
+              ));
+              genBtn.disabled = false;
+            } catch (e) {
+              attrHost.innerHTML = '<div class="empty-state muted">조회 실패</div>';
+            }
+          },
+        }
+      );
+      list.appendChild(table);
+    }
+    renderList();
+    document.getElementById("pt-refresh").addEventListener("click", async () => {
+      try {
+        const fresh = await window.API.get("/api/profiles");
+        profiles.splice(0, profiles.length, ...fresh);
+        renderList();
+        window.Toast.show("Profile 목록 갱신", "success");
+      } catch (e) { window.Toast.show("새로고침 실패", "error"); }
+    });
+  }
+
+  // --- Tab 2 ---
+  function renderTab2(host, profiles) {
+    host.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "split-vert";
+    host.appendChild(wrap);
+
+    // 상단: 폼
+    const formPanel = document.createElement("div");
+    formPanel.className = "panel";
+    formPanel.innerHTML = `
+      <div class="panel-header"><h2>측정 조건</h2></div>
+      <div class="panel-body">
+        <div class="benchmark-form">
+          <div class="col-prompt stack-sm">
+            <label>프롬프트</label>
+            <textarea id="bm-prompt" rows="3">Oracle이 어떤 회사인지 설명해줘. 300자 이내로 설명해줘.</textarea>
+          </div>
+          <div class="stack-sm">
+            <label>Action</label>
+            <select id="bm-action">
+              <option value="chat" selected>chat</option>
+              <option value="runsql">runsql</option>
+              <option value="narrate">narrate</option>
+              <option value="showsql">showsql</option>
+              <option value="explainsql">explainsql</option>
+            </select>
+          </div>
+          <div class="stack-sm">
+            <label>반복 횟수 (1-10)</label>
+            <input type="number" id="bm-iter" min="1" max="10" value="3" />
+          </div>
+          <div class="col-prompt stack-sm">
+            <label>Profile 다중 선택 <span class="muted" id="bm-profiles-hint"></span></label>
+            <div class="checklist" id="bm-profiles"></div>
+          </div>
+          <div class="col-prompt row end">
+            <button class="btn btn-primary" id="bm-run">▶ 실행</button>
+          </div>
+        </div>
+      </div>
+    `;
+    wrap.appendChild(formPanel);
+
+    // object_list 가 필요한 action — 해당 action 선택 시 has_object_list='Y' 만 노출
+    const OBJECT_LIST_ACTIONS = new Set(["runsql", "narrate", "showsql"]);
+
+    function renderProfileChecklist() {
+      const action = document.getElementById("bm-action").value;
+      const host = document.getElementById("bm-profiles");
+      const hint = document.getElementById("bm-profiles-hint");
+      const requiresObjects = OBJECT_LIST_ACTIONS.has(action);
+      const visible = requiresObjects
+        ? profiles.filter((p) => p.has_object_list === "Y")
+        : profiles;
+      hint.textContent = requiresObjects
+        ? `· ${action} 은(는) object_list 가 설정된 Profile 만 표시`
+        : "";
+      if (visible.length === 0) {
+        host.innerHTML = `<div class="muted">${action} 에 사용 가능한 Profile (object_list 설정) 이 없습니다</div>`;
+        return;
+      }
+      // 기존 선택 보존 — 살아남은 항목이 없을 때만 첫 3개 default 체크
+      const prevChecked = new Set(
+        Array.from(host.querySelectorAll("input:checked")).map((c) => c.value)
+      );
+      const survivors = visible.filter((p) => prevChecked.has(p.profile_name) && p.status === "ENABLED");
+      const useDefault = survivors.length === 0;
+      host.innerHTML = visible.map((p, i) => {
+        const enabled = p.status === "ENABLED";
+        const checked = useDefault ? (i < 3 && enabled) : prevChecked.has(p.profile_name);
+        return `<label><input type="checkbox" value="${p.profile_name}" ${checked ? "checked" : ""} ${enabled ? "" : "disabled"}/>
+          ${p.profile_name} <span class="muted">${enabled ? "" : "(disabled)"}</span></label>`;
+      }).join("");
+    }
+
+    renderProfileChecklist();
+    document.getElementById("bm-action").addEventListener("change", renderProfileChecklist);
+
+    // 중단: 결과 테이블
+    const resultPanel = document.createElement("div");
+    resultPanel.className = "panel";
+    resultPanel.innerHTML = `
+      <div class="panel-header"><h2>측정 결과</h2></div>
+      <div class="panel-body" id="bm-result"><div class="empty-state muted">[실행] 을 눌러 측정을 시작하세요.</div></div>
+    `;
+    wrap.appendChild(resultPanel);
+
+    // 하단: 차트
+    const chartPanel = document.createElement("div");
+    chartPanel.className = "panel";
+    chartPanel.innerHTML = `
+      <div class="panel-header"><h2>비교 차트 (평균 응답시간 ms)</h2></div>
+      <div class="panel-body" style="height:300px;">
+        <canvas id="bm-chart"></canvas>
+      </div>
+    `;
+    wrap.appendChild(chartPanel);
+
+    document.getElementById("bm-run").addEventListener("click", async () => {
+      const prompt = document.getElementById("bm-prompt").value;
+      const action = document.getElementById("bm-action").value;
+      const iterations = parseInt(document.getElementById("bm-iter").value, 10) || 1;
+      const profile_names = Array.from(document.querySelectorAll("#bm-profiles input:checked")).map((c) => c.value);
+      if (profile_names.length === 0) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+
+      const btn = document.getElementById("bm-run");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 실행 중...';
+      const resultHost = document.getElementById("bm-result");
+      resultHost.innerHTML = '<div class="empty-state"><span class="spinner"></span> 측정 중...</div>';
+
+      try {
+        const data = await window.API.post("/api/profiles/benchmark", { prompt, action, profile_names, iterations });
+        renderBenchmarkResult(resultHost, data);
+        renderChart(data);
+      } catch (e) {
+        const msg = errMsg(e, "측정 실패");
+        resultHost.innerHTML = `<div class="empty-state muted">${msg}</div>`;
+        window.Toast.show(msg, "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = "▶ 실행";
+      }
+    });
+  }
+
+  function renderBenchmarkResult(host, data) {
+    host.innerHTML = "";
+    const iters = data.iterations || (data.results[0]?.runs.length ?? 1);
+    const fmtNum = (v) => (v == null || v === "") ? v : Number(v).toLocaleString();
+    const columns = [
+      { key: "profile_name", label: "Profile", headerAlign: "center" },
+    ];
+    for (let i = 1; i <= iters; i++) {
+      columns.push({
+        key: (r) => r.runs[i - 1],
+        label: `#${i} (ms)`,
+        className: "metric",
+        headerAlign: "center",
+        format: (cell) => {
+          if (!cell) return "—";
+          if (cell.error) {
+            const td = document.createElement("span");
+            td.className = "error";
+            td.textContent = cell.error;
+            return td;
+          }
+          const span = document.createElement("span");
+          span.style.cursor = "pointer";
+          span.style.textDecoration = "underline dotted";
+          span.textContent = fmtNum(cell.elapsed_ms);
+          span.addEventListener("click", (e) => {
+            e.stopPropagation();
+            showResponseModal(cell.response);
+          });
+          return span;
+        },
+      });
+    }
+    columns.push(
+      { key: "avg_ms", label: "평균", className: "metric", headerAlign: "center", format: fmtNum },
+      { key: "min_ms", label: "최소", className: "metric", headerAlign: "center", format: fmtNum },
+      { key: "max_ms", label: "최대", className: "metric", headerAlign: "center", format: fmtNum },
+    );
+    host.appendChild(window.SimpleTable.create(columns, data.results, { className: "table-grid" }));
+  }
+
+  function showResponseModal(text) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <h2>LLM 응답</h2>
+          <button class="btn btn-ghost" id="modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre style="white-space:pre-wrap; margin:0; font-family:var(--font);">${(text || "").replace(/</g, "&lt;")}</pre>
+        </div>
+      </div>
+    `;
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.remove(); });
+    backdrop.querySelector("#modal-close").addEventListener("click", () => backdrop.remove());
+    document.body.appendChild(backdrop);
+  }
+
+  function renderChart(data) {
+    const ctx = document.getElementById("bm-chart");
+    if (!ctx) return;
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    chartInstance = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: data.results.map((r) => r.profile_name),
+        datasets: [{
+          label: "평균 응답시간 (ms)",
+          data: data.results.map((r) => r.avg_ms || 0),
+          backgroundColor: "#C74634",
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { beginAtZero: true, ticks: { font: { family: "Inter" } } },
+          x: { ticks: { font: { family: "Inter" } } },
+        },
+      },
+    });
+  }
+
+  function div(html) { const d = document.createElement("div"); d.innerHTML = html; return d; }
+
+  // 속성 Value 셀 — textarea + [적용] 버튼. 클릭 시 DBMS_CLOUD_AI.SET_ATTRIBUTE 호출.
+  function buildEditableValueCell(profileName, attr) {
+    const wrap = document.createElement("div");
+    wrap.className = "row";
+    wrap.style.gap = "6px";
+    wrap.style.alignItems = "flex-start";
+
+    const ta = document.createElement("textarea");
+    ta.rows = 1;
+    ta.value = attr.attribute_value == null ? "" : String(attr.attribute_value);
+    ta.style.flex = "1";
+    ta.style.fontFamily = "var(--font-mono)";
+    ta.style.fontSize = "var(--fs-sm)";
+    ta.style.resize = "vertical";
+    ta.style.minHeight = "32px";
+
+    const btn = document.createElement("button");
+    btn.className = "btn btn-ghost";
+    btn.textContent = "적용";
+    btn.style.flexShrink = "0";
+
+    btn.addEventListener("click", async () => {
+      const newVal = ta.value;
+      btn.disabled = true;
+      const prev = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        await window.API.put(
+          `/api/profiles/${encodeURIComponent(profileName)}/attributes/${encodeURIComponent(attr.attribute_name)}`,
+          { value: newVal }
+        );
+        attr.attribute_value = newVal;  // currentAttrs 와 동일 참조라 SQL 생성에도 반영
+        window.Toast.show(`${attr.attribute_name} 적용됨`, "success");
+      } catch (e) {
+        window.Toast.show(errMsg(e, "적용 실패"), "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = prev;
+      }
+    });
+
+    wrap.appendChild(ta);
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  // API 에러 메시지 추출 — FastAPI 의 {detail: {error, database}} 구조에 맞춤
+  function errMsg(err, fallback) {
+    const p = err && err.payload;
+    const d = p && (p.detail || p.error);
+    if (d) {
+      if (typeof d === "string") return d;
+      const txt = d.error || d.message || JSON.stringify(d);
+      return d.database ? `${txt} (${d.database})` : txt;
+    }
+    return (err && err.message) || fallback || "요청 실패";
+  }
+
+  // attribute_value 를 타입에 맞게 변환 — JSON 배열/객체, 숫자, 그 외 문자열
+  function coerceAttrValue(raw) {
+    if (raw == null) return "";
+    const s = String(raw).trim();
+    if (s.startsWith("[") || s.startsWith("{")) {
+      try { return JSON.parse(s); } catch (_) { /* fall through */ }
+    }
+    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+    return String(raw);
+  }
+
+  // 객체/배열을 인라인 한 줄 JSON 으로 (key 뒤 ": ", 항목 뒤 ", ")
+  function jsonInline(value) {
+    if (value === null) return "null";
+    if (typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) {
+      return "[" + value.map(jsonInline).join(", ") + "]";
+    }
+    const pairs = Object.entries(value).map(([k, v]) => JSON.stringify(k) + ": " + jsonInline(v));
+    return "{" + pairs.join(", ") + "}";
+  }
+
+  // 최상위 속성값 — 배열은 한 항목씩 줄바꿈, 그 외는 인라인
+  function formatTopValue(value) {
+    if (Array.isArray(value)) {
+      const items = value.map((it, i) =>
+        "                " + jsonInline(it) + (i === value.length - 1 ? "" : ",")
+      ).join("\n");
+      return "[\n" + items + "\n            ]";
+    }
+    return jsonInline(value);
+  }
+
+  function buildCreateProfileSql(profileName, attrs) {
+    const obj = {};
+    for (const a of attrs || []) {
+      if (!a || !a.attribute_name) continue;
+      obj[a.attribute_name] = coerceAttrValue(a.attribute_value);
+    }
+    const keys = Object.keys(obj);
+    const lines = keys.map((k, i) => {
+      const comma = i === keys.length - 1 ? "" : ",";
+      return `"${k}": ${formatTopValue(obj[k])}${comma}`;
+    });
+    const first = lines[0] || "";
+    const rest = lines.slice(1).map((l) => "            " + l).join("\n");
+    const attrBody = rest
+      ? `{${first}\n${rest}\n            }`
+      : `{${first}}`;
+    // Oracle PL/SQL 문자열 안에서 single-quote 는 '' 로 이스케이프
+    const attrJson = attrBody.replace(/'/g, "''");
+    return `BEGIN
+    dbms_cloud_ai.drop_profile(
+        profile_name => '${profileName}',
+        force => true
+    );
+
+    dbms_cloud_ai.create_profile(
+        profile_name => '${profileName}',
+        attributes =>
+            '${attrJson}'
+        );
+END;`;
+  }
+
+  // 개별 Profile 테스트 모달 — 프롬프트 + action → /api/profiles/benchmark (iterations:1) 호출
+  function openProfileTestModal(profileName) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:720px;">
+        <div class="modal-header">
+          <h2>Profile Test — ${profileName}</h2>
+          <button class="btn btn-ghost" id="pt-modal-close">✕</button>
+        </div>
+        <div class="modal-body stack">
+          <div class="stack-sm">
+            <label>프롬프트</label>
+            <textarea id="ptm-prompt" rows="3">Oracle이 어떤 회사인지 설명해줘. 300자 이내로 설명해줘.</textarea>
+          </div>
+          <div class="row" style="gap:12px; align-items:flex-end;">
+            <div class="stack-sm" style="flex:0 0 200px;">
+              <label>Action</label>
+              <select id="ptm-action">
+                <option value="chat" selected>chat</option>
+                <option value="runsql">runsql</option>
+                <option value="narrate">narrate</option>
+                <option value="showsql">showsql</option>
+                <option value="explainsql">explainsql</option>
+              </select>
+            </div>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary" id="ptm-run">▶ 실행</button>
+          </div>
+          <div class="stack-sm">
+            <label>결과 <span id="ptm-elapsed" class="muted" style="font-size:var(--fs-sm);"></span></label>
+            <textarea id="ptm-result" rows="10" readonly
+              style="font-family:var(--font-mono); font-size:var(--fs-sm);"
+              placeholder="[실행] 후 표시됩니다."></textarea>
+          </div>
+        </div>
+      </div>
+    `;
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.remove(); });
+    backdrop.querySelector("#pt-modal-close").addEventListener("click", () => backdrop.remove());
+
+    backdrop.querySelector("#ptm-run").addEventListener("click", async () => {
+      const prompt = backdrop.querySelector("#ptm-prompt").value;
+      const action = backdrop.querySelector("#ptm-action").value;
+      if (!prompt.trim()) { window.Toast.show("프롬프트를 입력하세요", "warn"); return; }
+      const runBtn = backdrop.querySelector("#ptm-run");
+      const elapsed = backdrop.querySelector("#ptm-elapsed");
+      const resultEl = backdrop.querySelector("#ptm-result");
+      runBtn.disabled = true;
+      runBtn.innerHTML = '<span class="spinner"></span> 실행 중...';
+      elapsed.textContent = "";
+      resultEl.value = "";
+      try {
+        const data = await window.API.post("/api/profiles/benchmark", {
+          prompt, action, profile_names: [profileName], iterations: 1,
+        });
+        const run = (data.results && data.results[0] && data.results[0].runs[0]) || {};
+        if (run.error) {
+          resultEl.value = run.error;
+          elapsed.textContent = `오류 · ${(run.elapsed_ms || 0).toLocaleString()} ms`;
+        } else {
+          resultEl.value = run.response || "";
+          elapsed.textContent = `${(run.elapsed_ms || 0).toLocaleString()} ms`;
+        }
+      } catch (e) {
+        const msg = errMsg(e, "실행 실패");
+        resultEl.value = msg;
+        elapsed.textContent = "오류";
+        window.Toast.show(msg, "error");
+      } finally {
+        runBtn.disabled = false;
+        runBtn.innerHTML = "▶ 실행";
+      }
+    });
+
+    document.body.appendChild(backdrop);
+    setTimeout(() => backdrop.querySelector("#ptm-prompt").focus(), 50);
+  }
+
+  function showSqlModal(title, sql) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:760px;">
+        <div class="modal-header">
+          <h2>${title}</h2>
+          <div class="row">
+            <button class="btn btn-ghost" id="sql-copy">복사</button>
+            <button class="btn btn-ghost" id="sql-close">✕</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <pre id="sql-pre" style="white-space:pre; margin:0; font-family:var(--font-mono); font-size:var(--fs-sm); background:var(--surface-alt); padding:var(--space-3); border-radius:var(--radius-md); overflow:auto;"></pre>
+        </div>
+      </div>
+    `;
+    backdrop.querySelector("#sql-pre").textContent = sql;
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.remove(); });
+    backdrop.querySelector("#sql-close").addEventListener("click", () => backdrop.remove());
+    backdrop.querySelector("#sql-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(sql);
+        window.Toast.show("클립보드에 복사됨", "success");
+      } catch (_) {
+        // fallback
+        const ta = document.createElement("textarea");
+        ta.value = sql; document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); window.Toast.show("클립보드에 복사됨", "success"); }
+        catch (e) { window.Toast.show("복사 실패", "error"); }
+        ta.remove();
+      }
+    });
+    document.body.appendChild(backdrop);
+  }
+
+  window.Views = window.Views || {};
+  window.Views.profileTest = render;
+})();

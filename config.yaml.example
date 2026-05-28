@@ -1,0 +1,24 @@
+# 다중 Oracle Autonomous Database 설정
+# 실제 사용 시 이 파일을 config.yaml 로 복사한 뒤 값 채우고, wallets/<db-name>/ 에 Wallet 압축 해제.
+# Step 1 에서는 미사용. Step 2 에서 로드된다.
+
+default_database: ADB-DEV
+
+databases:
+  - name: ADB-DEV
+    label: 개발 (ADB)
+    user: ADMIN
+    password: "your-admin-password"
+    dsn: mydb_dev_high
+    wallet_location: ./wallets/adb-dev
+    wallet_password: "your-wallet-password"
+    config_dir: ./wallets/adb-dev
+
+  - name: ADB-PROD
+    label: 운영 (ADB)
+    user: AI_USER
+    password: "your-user-password"
+    dsn: mydb_prod_high
+    wallet_location: ./wallets/adb-prod
+    wallet_password: "your-wallet-password"
+    config_dir: ./wallets/adb-prod
