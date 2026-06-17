@@ -6,19 +6,20 @@ Oracle Autonomous Database 23ai 의 **SELECT AI** (`DBMS_CLOUD_AI.GENERATE`), **
 
 ## ☁️ OCI 원클릭 배포 (Resource Manager)
 
-아래 버튼을 누르면 OCI Resource Manager 의 **Create Stack** 화면으로 이동하며, 이 리포의 Terraform 스택이 자동으로 로드됩니다. 부팅 시 소스를 clone → 의존성 설치 → 서비스 기동까지 자동 수행합니다. 배포 방식은 **두 가지** 중 선택합니다 — 둘 다 동일한 리포 zip 을 쓰며, **Create Stack 화면의 `Working directory` 드롭다운에서 어떤 폴더(`deploy/http` 또는 `deploy/https`)를 고르는지가 방식을 결정**합니다.
+아래 버튼을 누르면 OCI Resource Manager 의 **Create Stack** 화면으로 이동하며, 이 리포의 Terraform 스택이 자동으로 로드됩니다. 부팅 시 소스를 clone → 의존성 설치 → 서비스 기동까지 자동 수행합니다.
 
-### 옵션 A — HTTP (인증서 불필요, 간편) · 권장: 빠른 데모/내부 PoC
 [![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip)
 
-버튼 클릭 → **Working directory = `deploy/http`** 선택 → 구획/네트워크만 지정하고 **Apply**. Load Balancer·인증서 없이 인스턴스 공인 IP 로 직접 접속합니다. Outputs 의 `app_url`(`http://<공인IP>:8000`) 로 접속. **사전 준비:** 선택한 서브넷 보안 목록에 **앱 포트(기본 8000) 인바운드**만 열면 됩니다. (평문 HTTP — 내부망/데모 전용)
+> 버튼은 **하나**입니다. 배포 방식(HTTP/HTTPS)은 클릭 후 **Create Stack 화면의 `Working directory` 드롭다운에서 폴더를 고르는 것**으로 결정합니다. (Deploy 버튼 URL 은 working directory 를 미리 지정할 수 없어, 두 방식이 같은 zip 을 공유합니다.)
 
-### 옵션 B — HTTPS (Load Balancer + 인증서)
-[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip)
-
-버튼 클릭 → **Working directory = `deploy/https`** 선택 → **인증서 OCID** 등 입력 후 **Apply**. 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 으로 전달합니다. Outputs 의 `https_url`(`https://<LB IP>`) 로 접속. **사전 준비:** 서브넷 보안 목록에 443(및 80) 인바운드 + LB 가 인증서를 읽도록 **IAM 정책** 1회 생성 ([§4.2 HTTPS 사전 준비](#https-사전-준비-필수) 참조).
-
-> 두 버튼의 링크(zipUrl)는 동일합니다 — 버튼만으로는 방식이 구분되지 않으며, **Working directory 선택이 HTTP/HTTPS 를 결정**합니다.
+| | **옵션 A — HTTP** (인증서 불필요, 간편) | **옵션 B — HTTPS** (Load Balancer + 인증서) |
+|---|---|---|
+| Working directory | **`deploy/http`** 선택 | **`deploy/https`** 선택 |
+| 입력 | 구획/네트워크만 | + **인증서 OCID** 등 |
+| 동작 | LB 없이 인스턴스 공인 IP 직접 접속 | 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 전달 |
+| 접속 URL | `app_url` = `http://<공인IP>:8000` | `https_url` = `https://<LB IP>` |
+| 사전 준비 | 서브넷 보안 목록에 **앱 포트(기본 8000) 인바운드**만 | 서브넷에 443(및 80) 인바운드 + LB 가 인증서 읽도록 **IAM 정책** 1회 ([HTTPS 사전 준비](#https-사전-준비-필수)) |
+| 권장 | 빠른 데모/내부 PoC (평문 HTTP) | 외부 노출/TLS 필요 시 |
 
 배포가 끝나면 스택 Outputs 의 `app_url`(HTTP) 또는 `https_url`(HTTPS) 로 접속 → **[Database 관리]** 메뉴에서 ADB Wallet 을 업로드해 첫 DB 를 등록합니다. 자세한 절차는 [§4. OCI Resource Manager 배포](#4-oci-resource-manager-배포) 또는 별도 문서 **[DEPLOY_OCI.md](DEPLOY_OCI.md)** 참조.
 
@@ -142,7 +143,7 @@ GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle L
 > **네트워크는 직접 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록(Security List)에서 **앱 포트(기본 8000)** 와 **SSH(22)** 인바운드를 미리 허용해 두어야 합니다. (VCN/서브넷이 없다면 OCI 콘솔의 *Networking → VCN* 에서 먼저 생성하세요.) HTTPS 는 추가로 **443/80 인바운드 + IAM 정책** 이 필요합니다 ([HTTPS 사전 준비](#https-사전-준비-필수)).
 
 ### 동작 방식 (Deploy 버튼)
-README 상단의 두 **Deploy to Oracle Cloud** 버튼은 **동일한** 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
+README 상단의 **Deploy to Oracle Cloud** 버튼(하나)은 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
 ```
 https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip
 ```
