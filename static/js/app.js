@@ -3,9 +3,10 @@
  */
 (function () {
   const ROUTES = {
-    objects:  { render: () => window.Views.objectMeta(),  label: "Profile Object Meta" },
-    profiles: { render: () => window.Views.profileTest(), label: "AI Profile Test" },
-    agents:   { render: () => window.Views.agentTest(),   label: "AI Agent Team Test" },
+    objects:   { render: () => window.Views.objectMeta(),     label: "AI Profile Object Meta" },
+    profiles:  { render: () => window.Views.profileTest(),    label: "AI Profile Test" },
+    agents:    { render: () => window.Views.agentTest(),      label: "AI Agent Team Test" },
+    databases: { render: () => window.Views.databaseAdmin(),  label: "Database 관리" },
   };
   const DEFAULT_ROUTE = "profiles";
 

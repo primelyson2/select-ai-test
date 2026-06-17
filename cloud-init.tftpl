@@ -1,0 +1,52 @@
+#!/bin/bash
+# Oracle Linux 부트스트랩 — 소스 clone → uv sync → systemd 기동.
+# 진행 로그: /var/log/select-ai-deploy.log
+set -euxo pipefail
+exec > /var/log/select-ai-deploy.log 2>&1
+
+APP_DIR=/opt/select-ai-test
+APP_PORT=${app_port}
+
+# 1. 필수 패키지 (Oracle Linux 8/9)
+dnf install -y git python3.11 lsof || yum install -y git python3.11 lsof
+
+# 2. 소스 clone (공개 리포)
+rm -rf "$APP_DIR"
+git clone -b ${repo_branch} ${repo_url} "$APP_DIR"
+chown -R opc:opc "$APP_DIR"
+
+# 3. uv 설치 (opc 사용자 홈에)
+sudo -u opc bash -lc 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+
+# 4. 의존성 설치 (.venv 생성)
+sudo -u opc bash -lc "cd $APP_DIR && \$HOME/.local/bin/uv sync"
+
+# 5. systemd 서비스 — config.yaml 없이도 기동되며,
+#    배포 후 브라우저의 [Database 관리] 화면에서 ADB 를 등록한다.
+cat >/etc/systemd/system/select-ai-test.service <<EOF
+[Unit]
+Description=Oracle AI Database Test Tool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=$APP_DIR
+ExecStart=/home/opc/.local/bin/uv run uvicorn app.main:app --host 0.0.0.0 --port $APP_PORT --workers 1
+Restart=on-failure
+RestartSec=5
+Environment="PATH=/home/opc/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now select-ai-test
+
+# 6. OS 방화벽 개방 (firewalld)
+firewall-cmd --permanent --add-port=$APP_PORT/tcp || true
+firewall-cmd --reload || true
+
+echo "=== select-ai-test 배포 완료: 포트 $APP_PORT ==="

@@ -4,6 +4,14 @@ Oracle Autonomous Database 23ai 의 **SELECT AI** (`DBMS_CLOUD_AI.GENERATE`), **
 
 여러 ADB 를 등록해 두고 화면 우측 상단 드롭다운으로 전환하면서 동일한 프롬프트/팀을 **동일 도구로 비교**할 수 있습니다.
 
+## ☁️ OCI 원클릭 배포 (Resource Manager)
+
+아래 버튼을 누르면 OCI Resource Manager 의 **Create Stack** 화면으로 이동하며, 이 리포의 Terraform 스택이 자동으로 로드됩니다. SSH 공개키와 구획만 지정하고 **Apply** 하면 Oracle Linux 인스턴스가 생성되고 부팅 시 소스를 clone → 의존성 설치 → 서비스 기동까지 자동 수행합니다.
+
+[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip)
+
+배포가 끝나면 스택의 **Application Information**(또는 Outputs)에 표시되는 `app_url` 로 접속 → **[Database 관리]** 메뉴에서 ADB Wallet 을 업로드해 첫 DB 를 등록합니다. 자세한 절차는 [§4. OCI Resource Manager 배포](#4-oci-resource-manager-배포) 또는 별도 문서 **[DEPLOY_OCI.md](DEPLOY_OCI.md)** 참조.
+
 ---
 
 ## 1. 주요 기능
@@ -37,6 +45,14 @@ Oracle Autonomous Database 23ai 의 **SELECT AI** (`DBMS_CLOUD_AI.GENERATE`), **
 - **테이블 레벨**: Comment textarea 수정 + Annotation (1:N) 관리 모달 (`ALTER TABLE ... ANNOTATIONS (ADD OR REPLACE / DROP ...)`)
 - **컬럼 레벨**: 컬럼별 Comment 인라인 편집 → `Comment 일괄 저장`, Annotation 모달로 개별 추가/삭제
 - Identifier (owner/table/column/annotation name) 는 `^[A-Z][A-Z0-9_$#]*$` 정규식으로 화이트리스트 검증 후 SQL 보간. Comment / Annotation 값은 single-quote 이스케이프 후 SQL literal 로 삽입.
+
+### [메뉴 4] Database 관리
+- 테스트 대상 ADB 를 **화면에서 직접 등록·수정·삭제** (config.yaml 을 손으로 편집하지 않아도 됨).
+- **Wallet zip 업로드** — OCI 콘솔에서 내려받은 Instance Wallet zip 을 그대로 업로드하면 `wallets/<이름>/` 에 자동 압축 해제.
+- 업로드 즉시 `tnsnames.ora` 를 파싱해 **DSN 드롭다운** (`..._high` / `_medium` / `_low` 등) 을 자동 채움.
+- `연결 테스트` 버튼으로 풀을 재초기화하여 접속 가능 여부 즉시 확인 (성공/오류 ORA 메시지 표시).
+- 저장 시 `config.yaml` 을 다시 쓰고 해당 DB 풀을 재기동 → 헤더 드롭다운에 즉시 반영 (서버 재시작 불필요).
+- 비밀번호 / Wallet 비밀번호는 응답에 노출하지 않으며, 수정 시 비워두면 기존 값을 유지.
 
 ---
 
@@ -94,9 +110,82 @@ kill -9 <PID>
 
 ---
 
-## 4. VM 배포
+## 4. OCI Resource Manager 배포
 
-VM 에 소스를 복사한 후 `scripts/*.sh` 를 사용해 설치 → 실행합니다. 비밀 파일 (`config.yaml`, `wallets/`) 은 전송 대상에서 제외되며, VM 측에서 별도로 작성·배치합니다.
+GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle Linux 인스턴스를 만들고 앱을 기동합니다. 리포 루트의 Terraform 파일 4종이 스택을 구성합니다:
+
+| 파일 | 역할 |
+|---|---|
+| `main.tf` | provider + VCN/서브넷/IG/라우트/시큐리티리스트 + 컴퓨트 인스턴스 + 최신 Oracle Linux 이미지 조회 |
+| `variables.tf` | 입력 변수 (shape, OCPU/메모리, SSH 키, 포트, 허용 CIDR, 리포 URL/브랜치 등) |
+| `outputs.tf` | `app_url` / `public_ip` / `ssh_command` |
+| `cloud-init.tftpl` | 부팅 스크립트 — `git clone` → `uv sync` → systemd `select-ai-test` 서비스 등록·기동 → 방화벽 개방 |
+| `schema.yaml` | Resource Manager 변수 입력 UI |
+
+### 동작 방식 (Deploy 버튼)
+README 상단의 **Deploy to Oracle Cloud** 버튼은 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
+```
+https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip
+```
+> 다른 리포/브랜치로 바꾸려면 `zipUrl` 의 경로와 `…/refs/heads/<branch>.zip` 을 수정하세요.
+
+### 단계 0. (최초 1회) GitHub 에 소스 푸시
+이 `project/` 폴더가 **리포 루트**가 되도록 푸시합니다 (`config.yaml`·`wallets/` 는 `.gitignore` 로 자동 제외 — 비밀이 올라가지 않습니다).
+```bash
+cd project
+git init -b main
+git add .
+git commit -m "Initial: Oracle AI DB Test Tool + OCI RM stack"
+git remote add origin https://github.com/primelyson2/select-ai-test.git
+git push -u origin main
+```
+
+### 단계 1. Deploy 버튼 클릭 → Stack information
+- README 상단 **Deploy to Oracle Cloud** 버튼 클릭 → OCI 로그인 → **Create stack** 진입 (Terraform 구성이 자동 로드됨)
+- "I have reviewed and accept the Oracle Terms of Use" 체크 → **Next**
+
+### 단계 2. Configure variables
+| 변수 | 설명 |
+|---|---|
+| **구획 (Compartment)** | 리소스를 만들 구획 선택 |
+| **가용 도메인** | 비우면 첫 번째 AD 자동 사용 |
+| **Shape / OCPU / 메모리** | 기본 `VM.Standard.E4.Flex` · 1 OCPU · 8 GB. *Always Free* 는 `VM.Standard.A1.Flex`(ARM, 권장) 또는 `VM.Standard.E2.1.Micro` 선택 |
+| **SSH 공개키** | `~/.ssh/id_rsa.pub` 내용 붙여넣기 (인스턴스 SSH 접속용) |
+| **앱 포트** | 기본 `8000` |
+| **허용 CIDR** | 데모는 `0.0.0.0/0`. 운영은 사내 IP 대역으로 제한 권장 |
+| **Git 리포지토리 URL / 브랜치** | 기본값이 위 리포로 채워져 있음 |
+
+### 단계 3. Review → Create
+- **Create** 후 자동으로 **Apply** 가 실행되도록 두거나, 스택 생성 후 **Apply** 버튼 클릭
+- Apply Job 로그 끝에서 **Outputs** 확인 → `app_url` (예: `http://<공인IP>:8000`) 클릭
+
+### 단계 4. 첫 DB 등록
+- 브라우저에서 `app_url` 접속 → 좌측 **[Database 관리]** 메뉴
+- **+ 새 데이터베이스** → ADB Wallet(zip) 업로드 → 사용자/비밀번호/DSN 입력 → **저장** → **연결 테스트**
+- 헤더 드롭다운에 등록한 DB 가 나타나면 각 메뉴에서 테스트 시작
+
+> 인스턴스 부팅 후 `git clone`+`uv sync` 에 보통 1~3분 걸립니다. 접속이 안 되면 잠시 후 재시도하거나, SSH 로 진행 로그를 확인하세요:
+> ```bash
+> ssh opc@<공인IP>
+> sudo tail -f /var/log/select-ai-deploy.log        # 부트스트랩 진행
+> systemctl status select-ai-test                    # 서비스 상태
+> journalctl -u select-ai-test -f                    # 앱 로그
+> ```
+
+### 업데이트 / 재배포
+소스를 GitHub 에 다시 푸시한 뒤 인스턴스에서:
+```bash
+ssh opc@<공인IP>
+cd /opt/select-ai-test && git pull && ~/.local/bin/uv sync
+sudo systemctl restart select-ai-test
+```
+또는 Resource Manager 스택에서 **Destroy** 후 다시 **Apply** 하면 새 인스턴스로 깨끗하게 재배포됩니다.
+
+---
+
+## 4-B. 수동 VM 배포 (rsync)
+
+Resource Manager 없이 기존 VM 에 직접 올릴 때 사용합니다. 소스를 복사한 후 `scripts/*.sh` 로 설치 → 실행합니다. 비밀 파일 (`config.yaml`, `wallets/`) 은 전송 대상에서 제외되며, VM 측에서 별도로 작성·배치하거나 **[Database 관리]** 화면에서 등록합니다.
 
 ### 사전 준비 (VM 측)
 - Oracle Linux 8/9, Ubuntu 22.04 등 (`python3 --version` 기준 **3.11 이상**)
@@ -131,7 +220,11 @@ bash scripts/install.sh
 3. `uv sync` 로 의존성 동기화
 4. `config.yaml`, `wallets/` 누락 여부 점검 (경고만)
 
-### 단계 3. 설정 파일 / Wallet 배치
+### 단계 3. 설정 파일 / Wallet 배치 *(선택 — 화면에서 등록 가능)*
+서버는 `config.yaml` 이 없어도 기동됩니다. 기동 후 **[메뉴 4] Database 관리** 화면에서
+Wallet zip 업로드 + 접속정보 입력으로 첫 DB 를 바로 등록할 수 있습니다 (권장).
+
+CLI 로 미리 배치하려면:
 ```bash
 cp config.yaml.example config.yaml
 vi config.yaml                                    # ADB 접속정보 입력
@@ -139,6 +232,9 @@ vi config.yaml                                    # ADB 접속정보 입력
 mkdir -p wallets/<db-name>
 unzip Wallet_<db-name>.zip -d wallets/<db-name>/  # 또는 scp 로 미리 업로드
 ```
+> 화면에서 DB 를 추가/수정하면 서비스 실행 사용자가 `config.yaml` 과 `wallets/` 에
+> **쓰기 권한** 이 필요합니다 (systemd `User=` 와 작업 디렉토리 소유자 일치 확인).
+> 또한 런타임 등록 상태는 프로세스 메모리에 있으므로 `--workers 1` 로 실행하세요 (기본값).
 
 ### 단계 4. 실행
 ```bash
@@ -191,9 +287,14 @@ sudo firewall-cmd --reload
 ## 6. 프로젝트 구조
 
 ```
-project/
-├─ README.md                  # 본 문서
-├─ pyproject.toml             # uv 관리 의존성 (fastapi, oracledb, pyyaml, uvicorn)
+project/   (= GitHub 리포 select-ai-test 루트)
+├─ README.md                  # 본 문서 (상단에 Deploy to Oracle Cloud 버튼)
+├─ main.tf                    # OCI RM — provider/네트워크/컴퓨트/이미지
+├─ variables.tf               # OCI RM — 입력 변수
+├─ outputs.tf                 # OCI RM — app_url/public_ip/ssh_command
+├─ cloud-init.tftpl           # OCI RM — 부팅 부트스트랩(clone→uv sync→systemd)
+├─ schema.yaml                # OCI RM — 변수 입력 UI
+├─ pyproject.toml             # uv 관리 의존성 (fastapi, oracledb, pyyaml, uvicorn, python-multipart)
 ├─ config.yaml.example        # 설정 샘플 — config.yaml 로 복사 후 작성
 ├─ config.yaml                # 실제 설정 (git ignored — 비밀 포함)
 ├─ wallets/                   # ADB Wallet (git ignored)
@@ -204,7 +305,7 @@ project/
 │  ├─ db.py                   # 비동기 풀 dict + fetch_all/fetch_one/execute
 │  ├─ deps.py                 # current_db dependency (X-Database 헤더 검증)
 │  └─ routers/
-│     ├─ databases.py         # GET /api/databases
+│     ├─ databases.py         # 메뉴 4 — DB 목록/등록/수정/삭제/연결테스트 + Wallet zip 업로드
 │     ├─ profiles.py          # 메뉴 1 — Profile/Attributes/Benchmark + objects(stub→실DB)
 │     ├─ agents.py            # 메뉴 2 — Tree(batch)/Detail/Run/Timeline/SET_ATTRIBUTE
 │     └─ objects.py           # 메뉴 3 — Metadata/Comment/Annotation DDL

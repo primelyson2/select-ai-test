@@ -14,6 +14,7 @@ import yaml
 # project/ 루트 — app/ 의 부모 (config.yaml 이 여기에 놓인다)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+WALLETS_DIR = PROJECT_ROOT / "wallets"
 
 
 @dataclass
@@ -68,18 +69,34 @@ class AppConfig:
         return [d.name for d in self.databases]
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
+def load_raw(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+    """config.yaml 을 원본 dict 그대로 읽는다 (쓰기/수정용 — 상대경로 보존)."""
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(
-            f"config.yaml 이 존재하지 않습니다: {p}. config.yaml.example 을 참고해 작성하세요."
-        )
+        return {"default_database": "", "databases": []}
+    with p.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {"default_database": "", "databases": []}
+
+
+def save_raw(raw: dict[str, Any], path: str | Path = DEFAULT_CONFIG_PATH) -> None:
+    """원본 dict 를 config.yaml 로 저장 (한글/순서 보존)."""
+    p = Path(path)
+    with p.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+
+def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
+    # config.yaml 이 없거나 databases 가 비어 있어도 빈 설정으로 기동한다.
+    # (신규 Oracle Linux 설치 후 "Database 관리" 화면에서 첫 DB 를 등록할 수 있도록)
+    p = Path(path)
+    if not p.exists():
+        return AppConfig(default_database="", databases=[])
     with p.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     items = raw.get("databases") or []
-    if not items:
-        raise ValueError("config.yaml 의 databases 가 비어 있습니다")
     dbs = [DatabaseConfig.from_dict(d) for d in items]
+    if not dbs:
+        return AppConfig(default_database="", databases=[])
     default = raw.get("default_database") or dbs[0].name
     if not any(d.name == default for d in dbs):
         default = dbs[0].name

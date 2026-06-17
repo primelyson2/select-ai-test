@@ -405,6 +405,7 @@ async def run_team(payload: dict, database: str = Depends(current_db)) -> dict:
         "total_elapsed_ms": total_ms,
         "result": result_str or "",
         "timeline": timeline_payload["timeline"],
+        "thinking": timeline_payload["thinking"],
         "raw_logs": timeline_payload["raw_logs"],
     }
 
@@ -425,23 +426,74 @@ def _to_ms(td) -> int:
     return int(td.total_seconds() * 1000)
 
 
+# Thinking 과정 — 각 Agent/Task 별 LLM 프롬프트(원문)를 처리 순서대로 펼친다.
+# 하드코딩 conversation_id 대신 실행된 conversation_id 를 :cid 로 바인딩.
+# f_agent_step_title 는 사용자 정의 함수 — 미존재 시 쿼리가 실패하므로 호출부에서
+# 오류를 잡아 패널에 그대로 노출한다 (타임라인은 영향받지 않음).
+_THINKING_SQL = """
+WITH latest_team AS (
+  SELECT team_exec_id, team_name, start_date
+  FROM user_ai_agent_team_history
+  WHERE conversation_id = :cid
+),
+latest_task AS (
+    SELECT team_exec_id, task_name, agent_name, conversation_params, start_date,
+           ROW_NUMBER() OVER (PARTITION BY team_exec_id, task_name, agent_name
+                             ORDER BY start_date DESC) as rn
+  FROM user_ai_agent_task_history
+)
+SELECT
+  team.team_name,
+  task.task_name,
+  task.agent_name,
+  ROW_NUMBER() OVER (ORDER BY p.created ASC NULLS LAST) AS step_no,
+  f_agent_step_title(COALESCE(p.prompt, p.prompt_response)) as step_title,
+  COALESCE(p.prompt, p.prompt_response) AS raw_prompt,
+  p.conversation_id
+FROM latest_team team
+JOIN latest_task task
+  ON team.team_exec_id = task.team_exec_id
+ AND task.rn = 1
+LEFT JOIN user_cloud_ai_conversation_prompts p
+  ON p.conversation_id = JSON_VALUE(task.conversation_params, '$.conversation_id')
+ORDER BY p.created ASC NULLS LAST
+"""
+
+
+async def _fetch_thinking(database: str, conv_id: str) -> dict:
+    """Thinking SQL 실행 결과 (rows) + 오류 메시지(error)."""
+    if not conv_id:
+        return {"rows": [], "error": None}
+    try:
+        rows = await db.fetch_all(database, _THINKING_SQL, cid=conv_id)
+        return {"rows": rows, "error": None}
+    except Exception as exc:
+        msg = _first_line(exc)
+        logger.warning("thinking query failed: db=%s conv=%s: %s", database, conv_id, msg)
+        return {"rows": [], "error": msg}
+
+
 async def _build_timeline_and_logs(database: str, conv_id: str) -> dict:
     """conversation_id 로 team_exec_id 를 찾아 task/tool 이력을 시간축에 맞춤."""
     if not conv_id:
-        return {"timeline": [], "raw_logs": {
+        return {"timeline": [], "thinking": {"rows": [], "error": None}, "raw_logs": {
             "conversation_prompts": [], "task_history": [], "tool_history": [],
         }}
 
     # 1. team_history: conversation_id → team_exec_id, start_date
     #    TIMESTAMP WITH TIME ZONE 은 thin mode 미지원 → CAST AS TIMESTAMP 로 (UTC) 변환
-    th = await db.fetch_all(
-        database,
-        "SELECT team_exec_id, team_name, state, "
-        "       CAST(SYS_EXTRACT_UTC(start_date) AS TIMESTAMP) AS start_date, "
-        "       CAST(SYS_EXTRACT_UTC(end_date)   AS TIMESTAMP) AS end_date "
-        "  FROM USER_AI_AGENT_TEAM_HISTORY WHERE conversation_id = :cid "
-        " ORDER BY start_date",
-        cid=conv_id,
+    #    Thinking 쿼리는 독립적이라 함께 병렬 실행한다.
+    th, thinking = await asyncio.gather(
+        db.fetch_all(
+            database,
+            "SELECT team_exec_id, team_name, state, "
+            "       CAST(SYS_EXTRACT_UTC(start_date) AS TIMESTAMP) AS start_date, "
+            "       CAST(SYS_EXTRACT_UTC(end_date)   AS TIMESTAMP) AS end_date "
+            "  FROM USER_AI_AGENT_TEAM_HISTORY WHERE conversation_id = :cid "
+            " ORDER BY start_date",
+            cid=conv_id,
+        ),
+        _fetch_thinking(database, conv_id),
     )
     timeline: list[dict] = []
     task_history: list[dict] = []
@@ -450,81 +502,121 @@ async def _build_timeline_and_logs(database: str, conv_id: str) -> dict:
     if th:
         team_exec_ids = [r["team_exec_id"] for r in th]
         base_start = th[0]["start_date"]
-
-        # team 자체를 timeline 최상단에 추가
-        for r in th:
-            sd = r.get("start_date")
-            ed = r.get("end_date")
-            if sd is not None:
-                timeline.append({
-                    "step": f"TEAM {r.get('team_name') or ''}",
-                    "type": "team",
-                    "start_ms": _to_ms(sd - base_start),
-                    "end_ms": _to_ms((ed or sd) - base_start),
-                })
+        exec_ids_payload = json.dumps(team_exec_ids)
 
         # 2. task_history — 동일 conversation 에 여러 team_exec 가 있을 수 있어 모두 합침
-        exec_ids_payload = json.dumps(team_exec_ids)
+        #    task_order ASC 로 조회하고 INPUT/OUTPUT(CLOB) 도 함께 가져온다.
         tasks = await db.fetch_all(
             database,
             "SELECT th.task_order, th.agent_name, th.task_name, th.state, "
+            "       th.input, th.result AS output, "
             "       CAST(SYS_EXTRACT_UTC(th.start_date) AS TIMESTAMP) AS start_date, "
             "       CAST(SYS_EXTRACT_UTC(th.end_date)   AS TIMESTAMP) AS end_date "
             "  FROM USER_AI_AGENT_TASK_HISTORY th "
             "  JOIN JSON_TABLE(:payload, '$[*]' COLUMNS (eid VARCHAR2(64) PATH '$')) j "
             "    ON th.team_exec_id = j.eid "
-            " ORDER BY th.start_date, th.task_order",
+            " ORDER BY th.task_order, th.start_date",
             payload=exec_ids_payload,
         )
-        for r in tasks:
-            sd = r.get("start_date")
-            ed = r.get("end_date")
-            if sd is None:
-                continue
-            timeline.append({
-                "step": f"{r.get('agent_name') or '?'}.{r.get('task_name') or '?'}",
-                "type": "task",
-                "start_ms": _to_ms(sd - base_start),
-                "end_ms": _to_ms((ed or sd) - base_start),
-            })
-            elapsed = _to_ms((ed - sd)) if ed and sd else None
-            task_history.append({
-                "task_name": r.get("task_name") or "",
-                "status": r.get("state") or "",
-                "elapsed_ms": elapsed,
-            })
-
-        # 3. tool_history (개별 invocation)
+        # 3. tool_history (개별 invocation) — task_order / input / output(CLOB) 포함
         tools = await db.fetch_all(
             database,
             "SELECT toh.invocation_id, toh.task_order, toh.tool_name, toh.agent_name, toh.task_name, "
+            "       toh.input, toh.output, "
             "       CAST(SYS_EXTRACT_UTC(toh.start_date) AS TIMESTAMP) AS start_date, "
             "       CAST(SYS_EXTRACT_UTC(toh.end_date)   AS TIMESTAMP) AS end_date "
             "  FROM USER_AI_AGENT_TOOL_HISTORY toh "
             "  JOIN JSON_TABLE(:payload, '$[*]' COLUMNS (eid VARCHAR2(64) PATH '$')) j "
             "    ON toh.team_exec_id = j.eid "
-            " ORDER BY toh.start_date, toh.task_order",
+            " ORDER BY toh.task_order, toh.start_date",
             payload=exec_ids_payload,
         )
-        tool_agg: dict[str, dict] = {}
+
+        # tool 노드를 (agent, task) 키로 묶어 gantt 에 사용한다.
+        # raw_logs 의 tool_history 는 호출(invocation) 단위로 task_order/input/output 을 그대로 노출.
+        tools_by_task: dict[tuple, list[dict]] = {}
         for r in tools:
+            sd = r.get("start_date")
+            ed = r.get("end_date")
+            elapsed = _to_ms(ed - sd) if (ed and sd) else None
+            tool_history.append({
+                "task_order": r.get("task_order"),
+                "tool_name": r.get("tool_name") or "",
+                "input": r.get("input") or "",
+                "output": r.get("output") or "",
+                "elapsed_ms": elapsed,
+            })
+            if sd is None:
+                continue
+            key = (r.get("agent_name") or "?", r.get("task_name") or "?")
+            tools_by_task.setdefault(key, []).append({
+                "label": r.get("tool_name") or "?",
+                "type": "tool",
+                "level": 3,
+                "start_ms": _to_ms(sd - base_start),
+                "end_ms": _to_ms((ed or sd) - base_start),
+            })
+        for nodes in tools_by_task.values():
+            nodes.sort(key=lambda x: x["start_ms"])
+
+        # task 노드를 agent 별로 묶는다 (최초 등장 순서 = start_date 순서 유지)
+        agent_order: list[str] = []
+        tasks_by_agent: dict[str, list[dict]] = {}
+        for r in tasks:
             sd = r.get("start_date")
             ed = r.get("end_date")
             if sd is None:
                 continue
-            timeline.append({
-                "step": f"{r.get('agent_name') or '?'}.{r.get('task_name') or '?'} ▶ {r.get('tool_name') or '?'}",
-                "type": "tool",
+            agent = r.get("agent_name") or "?"
+            task = r.get("task_name") or "?"
+            node = {
+                "label": task,
+                "type": "task",
+                "level": 2,
                 "start_ms": _to_ms(sd - base_start),
                 "end_ms": _to_ms((ed or sd) - base_start),
+                "_tools": tools_by_task.get((agent, task), []),
+            }
+            if agent not in tasks_by_agent:
+                tasks_by_agent[agent] = []
+                agent_order.append(agent)
+            tasks_by_agent[agent].append(node)
+            elapsed = _to_ms((ed - sd)) if ed and sd else None
+            task_history.append({
+                "task_order": r.get("task_order"),
+                "task_name": task,
+                "status": r.get("state") or "",
+                "input": r.get("input") or "",
+                "output": r.get("output") or "",
+                "elapsed_ms": elapsed,
             })
-            # tool_history 는 도구별 집계
-            tname = r.get("tool_name") or ""
-            entry = tool_agg.setdefault(tname, {"tool_name": tname, "calls": 0, "elapsed_ms": 0})
-            entry["calls"] += 1
-            if ed and sd:
-                entry["elapsed_ms"] += _to_ms(ed - sd)
-        tool_history = list(tool_agg.values())
+
+        # pre-order 평탄화: Team(0) → Agent(1) → Task(2) → Tool(3)
+        for r in th:
+            sd = r.get("start_date")
+            ed = r.get("end_date")
+            if sd is not None:
+                timeline.append({
+                    "label": r.get("team_name") or "",
+                    "type": "team",
+                    "level": 0,
+                    "start_ms": _to_ms(sd - base_start),
+                    "end_ms": _to_ms((ed or sd) - base_start),
+                })
+        for agent in agent_order:
+            agent_tasks = tasks_by_agent[agent]
+            # Agent 레벨 바 = 소속 Task 들의 시간 범위 집계
+            timeline.append({
+                "label": agent,
+                "type": "agent",
+                "level": 1,
+                "start_ms": min(t["start_ms"] for t in agent_tasks),
+                "end_ms": max(t["end_ms"] for t in agent_tasks),
+            })
+            for tnode in agent_tasks:
+                tool_nodes = tnode.pop("_tools")
+                timeline.append(tnode)
+                timeline.extend(tool_nodes)
 
     # 4. conversation_prompts → role/content 펼치기 (user + assistant)
     raw_prompts = await db.fetch_all(
@@ -557,6 +649,7 @@ async def _build_timeline_and_logs(database: str, conv_id: str) -> dict:
 
     return {
         "timeline": timeline,
+        "thinking": thinking,
         "raw_logs": {
             "conversation_prompts": convo,
             "task_history": task_history,

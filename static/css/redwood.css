@@ -139,6 +139,8 @@ h3 { font-size: var(--fs-md); }
 input[type="text"],
 input[type="number"],
 input[type="search"],
+input[type="password"],
+input[type="file"],
 textarea,
 select {
   font-family: var(--font);
@@ -194,6 +196,7 @@ label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
   font-weight: 600;
   color: var(--text-muted);
   font-size: var(--fs-sm);
+  text-align: center;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   position: sticky;
@@ -211,7 +214,8 @@ label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
 .table.table-grid { border-top: 1px solid var(--border); }
 .table.table-grid th, .table.table-grid td { border-bottom: 1px solid var(--border); }
 /* 헤더 라벨을 원문 그대로 (예: "ms" 소문자 유지) */
-.table.table-grid th { text-transform: none; letter-spacing: 0; }
+.table.table-grid th,
+.table.keep-case th { text-transform: none; letter-spacing: 0; }
 
 /* 한 줄로 시작 → 내용에 따라 자동 확장 → 우하단 drag 로도 조정 가능한 textarea */
 .textarea-auto {
@@ -303,6 +307,7 @@ label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
   flex: 1;
   min-width: 0;
   word-break: break-word;
+  white-space: pre-wrap;
   line-height: 1.4;
 }
 .tree-tag {

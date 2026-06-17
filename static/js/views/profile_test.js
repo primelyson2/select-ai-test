@@ -157,7 +157,15 @@
       <div class="panel-body">
         <div class="benchmark-form">
           <div class="col-prompt stack-sm">
-            <label>프롬프트</label>
+            <div class="row" style="justify-content: space-between;">
+              <label>프롬프트</label>
+              <div class="row" style="gap:6px;">
+                <input type="text" id="bm-prompt-title" placeholder="저장할 제목" style="width:130px;">
+                <button class="btn" id="bm-prompt-add">추가</button>
+                <button class="btn" id="bm-prompt-update">수정</button>
+                <select id="bm-prompt-saved" style="min-width:150px;"></select>
+              </div>
+            </div>
             <textarea id="bm-prompt" rows="3">Oracle이 어떤 회사인지 설명해줘. 300자 이내로 설명해줘.</textarea>
           </div>
           <div class="stack-sm">
@@ -220,6 +228,74 @@
 
     renderProfileChecklist();
     document.getElementById("bm-action").addEventListener("change", renderProfileChecklist);
+
+    // --- 프롬프트 저장/불러오기 (localStorage, 세션 간 유지) — 테스트 모달과 동일 라이브러리 공유 ---
+    const BM_PROMPTS_KEY = "profileTest.savedPrompts";
+    const bmPromptEl = document.getElementById("bm-prompt");
+    const bmTitleInput = document.getElementById("bm-prompt-title");
+    const bmAddBtn = document.getElementById("bm-prompt-add");
+    const bmUpdateBtn = document.getElementById("bm-prompt-update");
+    const bmSavedSel = document.getElementById("bm-prompt-saved");
+
+    const bmLoadSaved = () => {
+      try { return JSON.parse(localStorage.getItem(BM_PROMPTS_KEY)) || []; }
+      catch (e) { return []; }
+    };
+    const bmRefreshCombo = (selectTitle) => {
+      const list = bmLoadSaved();
+      bmSavedSel.innerHTML = "";
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = list.length ? "저장된 프롬프트…" : "(저장된 프롬프트 없음)";
+      bmSavedSel.appendChild(ph);
+      list.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.title;
+        o.textContent = p.title;
+        bmSavedSel.appendChild(o);
+      });
+      if (selectTitle != null) bmSavedSel.value = selectTitle;
+    };
+    bmRefreshCombo();
+
+    // 추가 — 제목칸의 새 title 로 현재 프롬프트를 신규 저장 (중복 title 은 거부)
+    bmAddBtn.addEventListener("click", () => {
+      const title = bmTitleInput.value.trim();
+      const prompt = bmPromptEl.value;
+      if (!title) { window.Toast.show("추가할 제목을 입력하세요", "error"); bmTitleInput.focus(); return; }
+      if (!prompt.trim()) { window.Toast.show("프롬프트가 비어 있습니다", "error"); return; }
+      const list = bmLoadSaved();
+      if (list.some((p) => p.title === title)) {
+        window.Toast.show("이미 있는 제목입니다. [저장]으로 수정하세요", "error");
+        return;
+      }
+      list.push({ title, prompt });
+      localStorage.setItem(BM_PROMPTS_KEY, JSON.stringify(list));
+      bmRefreshCombo(title);
+      bmTitleInput.value = "";
+      window.Toast.show(`'${title}' 추가됨`, "success");
+    });
+
+    // 저장 — 콤보에서 선택한 기존 title 의 프롬프트를 현재 내용으로 수정
+    bmUpdateBtn.addEventListener("click", () => {
+      const title = bmSavedSel.value;
+      if (!title) { window.Toast.show("수정할 항목을 콤보에서 선택하세요", "error"); return; }
+      const prompt = bmPromptEl.value;
+      if (!prompt.trim()) { window.Toast.show("프롬프트가 비어 있습니다", "error"); return; }
+      const list = bmLoadSaved();
+      const idx = list.findIndex((p) => p.title === title);
+      if (idx < 0) { window.Toast.show("저장된 항목을 찾을 수 없습니다", "error"); return; }
+      list[idx].prompt = prompt;
+      localStorage.setItem(BM_PROMPTS_KEY, JSON.stringify(list));
+      window.Toast.show(`'${title}' 수정됨`, "success");
+    });
+
+    bmSavedSel.addEventListener("change", () => {
+      const title = bmSavedSel.value;
+      if (!title) return;
+      const found = bmLoadSaved().find((p) => p.title === title);
+      if (found) bmPromptEl.value = found.prompt;
+    });
 
     // 중단: 결과 테이블
     const resultPanel = document.createElement("div");
@@ -493,7 +569,15 @@ END;`;
         </div>
         <div class="modal-body stack">
           <div class="stack-sm">
-            <label>프롬프트</label>
+            <div class="row" style="justify-content: space-between;">
+              <label>프롬프트</label>
+              <div class="row" style="gap:6px;">
+                <input type="text" id="ptm-prompt-title" placeholder="저장할 제목" style="width:130px;">
+                <button class="btn" id="ptm-prompt-add">추가</button>
+                <button class="btn" id="ptm-prompt-update">수정</button>
+                <select id="ptm-prompt-saved" style="min-width:150px;"></select>
+              </div>
+            </div>
             <textarea id="ptm-prompt" rows="3">Oracle이 어떤 회사인지 설명해줘. 300자 이내로 설명해줘.</textarea>
           </div>
           <div class="row" style="gap:12px; align-items:flex-end;">
@@ -521,6 +605,74 @@ END;`;
     `;
     backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.remove(); });
     backdrop.querySelector("#pt-modal-close").addEventListener("click", () => backdrop.remove());
+
+    // --- 프롬프트 저장/불러오기 (localStorage, 세션 간 유지) ---
+    const PROMPTS_KEY = "profileTest.savedPrompts";
+    const promptEl = backdrop.querySelector("#ptm-prompt");
+    const titleInput = backdrop.querySelector("#ptm-prompt-title");
+    const addBtn = backdrop.querySelector("#ptm-prompt-add");
+    const updateBtn = backdrop.querySelector("#ptm-prompt-update");
+    const savedSel = backdrop.querySelector("#ptm-prompt-saved");
+
+    const loadSaved = () => {
+      try { return JSON.parse(localStorage.getItem(PROMPTS_KEY)) || []; }
+      catch (e) { return []; }
+    };
+    const refreshCombo = (selectTitle) => {
+      const list = loadSaved();
+      savedSel.innerHTML = "";
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = list.length ? "저장된 프롬프트…" : "(저장된 프롬프트 없음)";
+      savedSel.appendChild(ph);
+      list.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.title;
+        o.textContent = p.title;
+        savedSel.appendChild(o);
+      });
+      if (selectTitle != null) savedSel.value = selectTitle;
+    };
+    refreshCombo();
+
+    // 추가 — 제목칸의 새 title 로 현재 프롬프트를 신규 저장 (중복 title 은 거부)
+    addBtn.addEventListener("click", () => {
+      const title = titleInput.value.trim();
+      const prompt = promptEl.value;
+      if (!title) { window.Toast.show("추가할 제목을 입력하세요", "error"); titleInput.focus(); return; }
+      if (!prompt.trim()) { window.Toast.show("프롬프트가 비어 있습니다", "error"); return; }
+      const list = loadSaved();
+      if (list.some((p) => p.title === title)) {
+        window.Toast.show("이미 있는 제목입니다. [저장]으로 수정하세요", "error");
+        return;
+      }
+      list.push({ title, prompt });
+      localStorage.setItem(PROMPTS_KEY, JSON.stringify(list));
+      refreshCombo(title);
+      titleInput.value = "";
+      window.Toast.show(`'${title}' 추가됨`, "success");
+    });
+
+    // 저장 — 콤보에서 선택한 기존 title 의 프롬프트를 현재 내용으로 수정
+    updateBtn.addEventListener("click", () => {
+      const title = savedSel.value;
+      if (!title) { window.Toast.show("수정할 항목을 콤보에서 선택하세요", "error"); return; }
+      const prompt = promptEl.value;
+      if (!prompt.trim()) { window.Toast.show("프롬프트가 비어 있습니다", "error"); return; }
+      const list = loadSaved();
+      const idx = list.findIndex((p) => p.title === title);
+      if (idx < 0) { window.Toast.show("저장된 항목을 찾을 수 없습니다", "error"); return; }
+      list[idx].prompt = prompt;
+      localStorage.setItem(PROMPTS_KEY, JSON.stringify(list));
+      window.Toast.show(`'${title}' 수정됨`, "success");
+    });
+
+    savedSel.addEventListener("change", () => {
+      const title = savedSel.value;
+      if (!title) return;
+      const found = loadSaved().find((p) => p.title === title);
+      if (found) promptEl.value = found.prompt;
+    });
 
     backdrop.querySelector("#ptm-run").addEventListener("click", async () => {
       const prompt = backdrop.querySelector("#ptm-prompt").value;

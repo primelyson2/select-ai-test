@@ -1,0 +1,153 @@
+title: "Oracle AI Database Test Tool"
+description: "Oracle Linux 컴퓨트 인스턴스에 SELECT AI / AI Agent Team PoC 도구를 배포합니다."
+schemaVersion: 1.1.0
+locale: "en"
+
+variableGroups:
+  - title: "자동 주입 (숨김)"
+    visible: false
+    variables:
+      - tenancy_ocid
+      - region
+
+  - title: "일반"
+    variables:
+      - compartment_ocid
+      - app_name
+
+  - title: "컴퓨트"
+    variables:
+      - availability_domain
+      - instance_shape
+      - instance_ocpus
+      - instance_memory_gbs
+      - os_version
+      - ssh_public_key
+
+  - title: "네트워크 접근"
+    variables:
+      - app_port
+      - app_allowed_cidr
+      - ssh_allowed_cidr
+
+  - title: "애플리케이션 소스"
+    variables:
+      - repo_url
+      - repo_branch
+
+variables:
+  compartment_ocid:
+    type: oci:identity:compartment:id
+    title: "구획 (Compartment)"
+    description: "리소스를 생성할 구획"
+    required: true
+
+  app_name:
+    type: string
+    title: "리소스 이름 접두사"
+    default: "select-ai-test"
+    required: true
+
+  availability_domain:
+    type: oci:identity:availabilitydomain:name
+    title: "가용 도메인"
+    description: "비우면 첫 번째 AD 사용"
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+    required: false
+
+  instance_shape:
+    type: enum
+    title: "Shape"
+    enum:
+      - "VM.Standard.E4.Flex"
+      - "VM.Standard.E5.Flex"
+      - "VM.Standard.A1.Flex"
+      - "VM.Standard.E2.1.Micro"
+    default: "VM.Standard.E4.Flex"
+    required: true
+
+  instance_ocpus:
+    type: number
+    title: "OCPU 수 (Flex shape 전용 — Micro 는 무시됨)"
+    default: 1
+    minimum: 1
+    maximum: 64
+    required: true
+
+  instance_memory_gbs:
+    type: number
+    title: "메모리 GB (Flex shape 전용 — Micro 는 무시됨)"
+    default: 8
+    minimum: 1
+    maximum: 1024
+    required: true
+
+  os_version:
+    type: enum
+    title: "Oracle Linux 버전"
+    enum:
+      - "9"
+      - "8"
+    default: "9"
+    required: true
+
+  ssh_public_key:
+    type: string
+    title: "SSH 공개키"
+    description: "인스턴스 SSH 접속용 공개키 (ssh-rsa ... 한 줄)"
+    required: true
+
+  app_port:
+    type: number
+    title: "앱 포트"
+    default: 8000
+    minimum: 1
+    maximum: 65535
+    required: true
+
+  app_allowed_cidr:
+    type: string
+    title: "앱 포트 허용 CIDR"
+    default: "0.0.0.0/0"
+    required: true
+
+  ssh_allowed_cidr:
+    type: string
+    title: "SSH 허용 CIDR"
+    default: "0.0.0.0/0"
+    required: true
+
+  repo_url:
+    type: string
+    title: "Git 리포지토리 URL"
+    default: "https://github.com/primelyson2/select-ai-test.git"
+    required: true
+
+  repo_branch:
+    type: string
+    title: "브랜치"
+    default: "main"
+    required: true
+
+outputGroups:
+  - title: "애플리케이션"
+    outputs:
+      - app_url
+      - public_ip
+      - ssh_command
+
+outputs:
+  app_url:
+    type: link
+    title: "애플리케이션 URL"
+
+  public_ip:
+    type: string
+    title: "공인 IP"
+
+  ssh_command:
+    type: copyableString
+    title: "SSH 접속 명령"
+
+primaryOutputButton: app_url

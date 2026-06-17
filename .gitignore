@@ -15,3 +15,12 @@ wallets/
 
 # OS
 .DS_Store
+
+# Terraform (OCI Resource Manager 는 .tf/schema.yaml 만 필요 — 로컬 산출물 제외)
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+crash.log

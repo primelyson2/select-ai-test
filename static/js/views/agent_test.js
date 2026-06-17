@@ -1,8 +1,16 @@
 /** views/agent_test.js — 메뉴 [3] AI Agent Team Test (2 탭, 상하구조). */
 (function () {
+  // 노드 상세(detail) 응답 캐시. 같은 노드 재선택 시 재요청 없이 즉시 표시.
+  // 키: "<kind>:<name>". DB 전환 시 뷰 전체가 재렌더되므로 render() 진입 때 비운다.
+  const detailCache = new Map();
+
+  // 숫자 천단위 콤마 (null/빈값은 그대로).
+  const nf = (v) => (v == null || v === "") ? v : Number(v).toLocaleString();
+
   async function render() {
     const main = document.getElementById("main");
     main.innerHTML = "";
+    detailCache.clear();
 
     const title = document.createElement("div");
     title.className = "view-title";
@@ -10,24 +18,26 @@
       <span class="sub">Team / Agent / Task / Tool 조회 + Team 실행 시 단계별 시간 추적.</span>`;
     main.appendChild(title);
 
-    // 트리 데이터 한번 로드 후 두 탭에서 공유 (mock 기준)
-    let teams = [];
+    // /tree 한 번으로 트리 데이터 + 팀 목록을 모두 확보 (별도 /teams 왕복 제거).
+    let treeData = { teams: [], tools_meta: {} };
     try {
-      teams = await window.API.get("/api/agents/teams");
+      treeData = await window.API.get("/api/agents/tree");
     } catch (e) {
-      main.appendChild(divFromHTML('<div class="empty-state muted">Team 목록 로드 실패</div>'));
+      main.appendChild(divFromHTML('<div class="empty-state muted">Team 트리 로드 실패</div>'));
       return;
     }
+    const teams = (treeData.teams || []).map((t) => ({ name: t.name, status: t.status }));
 
     const tabs = window.Tabs.create([
-      { id: "tree", label: "1. Team / Agent / Task / Tool",   render: (host) => renderTab1(host, teams) },
+      { id: "tree", label: "1. Team / Agent / Task / Tool",   render: (host) => renderTab1(host, treeData) },
       { id: "run",  label: "2. Team 실행 및 단계별 속도",     render: (host) => renderTab2(host, teams) },
     ]);
     main.appendChild(tabs);
   }
 
   // --- Tab 1: 상단 트리 + 하단 상세 ---
-  async function renderTab1(host, teams) {
+  // treeData 는 render() 에서 /api/agents/tree 로 미리 받아 전달 (재요청 없음).
+  function renderTab1(host, treeData) {
     host.innerHTML = "";
     const wrap = document.createElement("div");
     wrap.className = "split-vert";
@@ -37,7 +47,7 @@
     topPanel.className = "panel scroll";
     topPanel.innerHTML = `
       <div class="panel-header"><h2>Team 트리</h2></div>
-      <div class="panel-body" id="at-tree"><div class="empty-state"><span class="spinner"></span> 트리 구성 중...</div></div>
+      <div class="panel-body" id="at-tree"></div>
     `;
     wrap.appendChild(topPanel);
 
@@ -51,15 +61,6 @@
     `;
     wrap.appendChild(bottomPanel);
 
-    // 트리 구성: /api/agents/tree 한 번에 모두 받음 (백엔드에서 5쿼리 병렬 실행)
-    let treeData = { teams: [], tools_meta: {} };
-    try {
-      treeData = await window.API.get("/api/agents/tree");
-    } catch (e) {
-      document.getElementById("at-tree").innerHTML =
-        '<div class="empty-state muted">트리 로드 실패</div>';
-      return;
-    }
     const toolsMeta = treeData.tools_meta || {};
     const treeNodes = (treeData.teams || []).map((t) => {
       const taskMap = new Map((t.tasks || []).map((tk) => [tk.name, tk]));
@@ -105,21 +106,36 @@
     });
 
     document.getElementById("at-tree").innerHTML = "";
+    let activeKey = null;  // 가장 최근 선택 — 늦게 온 응답이 현재 선택을 덮어쓰지 않게.
     const tree = window.Tree.create(treeNodes, {
       onSelect: async (node) => {
         if (!node.meta) return;
         const title = document.getElementById("at-detail-title");
         const body = document.getElementById("at-detail");
         title.textContent = `${node.meta.kind.toUpperCase()} — ${node.meta.name}`;
+
+        const cacheKey = `${node.meta.kind}:${node.meta.name}`;
+        activeKey = cacheKey;
+
+        // 캐시 적중 시 네트워크 없이 즉시 렌더
+        const cached = detailCache.get(cacheKey);
+        if (cached) {
+          body.innerHTML = "";
+          body.appendChild(renderAttributes(cached, node.meta));
+          return;
+        }
+
         body.innerHTML = '<div class="empty-state"><span class="spinner"></span> 조회 중...</div>';
         let detail = {};
         try {
           const path = pathFor(node.meta);
           detail = await window.API.get(path);
         } catch (e) {
-          body.innerHTML = '<div class="empty-state muted">조회 실패</div>';
+          if (activeKey === cacheKey) body.innerHTML = '<div class="empty-state muted">조회 실패</div>';
           return;
         }
+        detailCache.set(cacheKey, detail);
+        if (activeKey !== cacheKey) return;  // 그 사이 다른 노드를 선택했으면 렌더 생략
         body.innerHTML = "";
         body.appendChild(renderAttributes(detail, node.meta));
       },
@@ -133,7 +149,9 @@
   //   task  — instruction 전체
   //   tool  — instruction 전체
   function summary(kind, obj) {
-    const clean = (s) => (s ? String(s).replace(/\s+/g, " ").trim() : "");
+    // 줄바꿈은 유지하고 공백/탭만 정리 (CSS white-space: pre-wrap 로 렌더)
+    const clean = (s) =>
+      (s ? String(s).replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim() : "");
     if (kind === "agent") return clean(obj.role);
     if (kind === "task")  return clean(obj.instruction);
     if (kind === "tool")  return clean(obj.instruction);
@@ -263,7 +281,15 @@
           <span id="at-status" class="status-pill"><span class="dot"></span> 대기</span>
         </div>
         <div class="stack-sm">
-          <label>User Prompt</label>
+          <div class="row" style="justify-content: space-between;">
+            <label>User Prompt</label>
+            <div class="row" style="gap:6px;">
+              <input type="text" id="at-prompt-title" placeholder="저장할 제목" style="width:130px;">
+              <button class="btn" id="at-prompt-add">추가</button>
+              <button class="btn" id="at-prompt-update">수정</button>
+              <select id="at-prompt-saved" style="min-width:150px;"></select>
+            </div>
+          </div>
           <textarea id="at-prompt" rows="3">배송 주소 관련 컬럼이 있는 테이블을 찾아줘</textarea>
         </div>
         <div class="row end">
@@ -272,6 +298,92 @@
       </div>
     `;
     wrap.appendChild(topPanel);
+
+    // --- User Prompt 저장/불러오기 (localStorage, 세션 간 유지) ---
+    const PROMPTS_KEY = "agentTest.savedPrompts";
+    const titleInput = document.getElementById("at-prompt-title");
+    const addBtn = document.getElementById("at-prompt-add");
+    const updateBtn = document.getElementById("at-prompt-update");
+    const savedSel = document.getElementById("at-prompt-saved");
+    const promptTa = document.getElementById("at-prompt");
+
+    const loadSaved = () => {
+      try { return JSON.parse(localStorage.getItem(PROMPTS_KEY)) || []; }
+      catch (e) { return []; }
+    };
+    const refreshCombo = (selectTitle) => {
+      const list = loadSaved();
+      savedSel.innerHTML = "";
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = list.length ? "저장된 프롬프트…" : "(저장된 프롬프트 없음)";
+      savedSel.appendChild(ph);
+      list.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.title;
+        o.textContent = p.title;
+        savedSel.appendChild(o);
+      });
+      if (selectTitle != null) savedSel.value = selectTitle;
+    };
+    refreshCombo();
+
+    // 추가 — 제목칸의 새 title 로 현재 프롬프트를 신규 저장 (중복 title 은 거부)
+    addBtn.addEventListener("click", () => {
+      const title = titleInput.value.trim();
+      const prompt = promptTa.value;
+      if (!title) { window.Toast.show("추가할 제목을 입력하세요", "error"); titleInput.focus(); return; }
+      if (!prompt.trim()) { window.Toast.show("User Prompt 가 비어 있습니다", "error"); return; }
+      const list = loadSaved();
+      if (list.some((p) => p.title === title)) {
+        window.Toast.show("이미 있는 제목입니다. [저장]으로 수정하세요", "error");
+        return;
+      }
+      list.push({ title, prompt });
+      localStorage.setItem(PROMPTS_KEY, JSON.stringify(list));
+      refreshCombo(title);
+      titleInput.value = "";
+      window.Toast.show(`'${title}' 추가됨`, "success");
+    });
+
+    // 저장 — 콤보에서 선택한 기존 title 의 프롬프트를 현재 내용으로 수정
+    updateBtn.addEventListener("click", () => {
+      const title = savedSel.value;
+      if (!title) { window.Toast.show("수정할 항목을 콤보에서 선택하세요", "error"); return; }
+      const prompt = promptTa.value;
+      if (!prompt.trim()) { window.Toast.show("User Prompt 가 비어 있습니다", "error"); return; }
+      const list = loadSaved();
+      const idx = list.findIndex((p) => p.title === title);
+      if (idx < 0) { window.Toast.show("저장된 항목을 찾을 수 없습니다", "error"); return; }
+      list[idx].prompt = prompt;
+      localStorage.setItem(PROMPTS_KEY, JSON.stringify(list));
+      window.Toast.show(`'${title}' 수정됨`, "success");
+    });
+
+    savedSel.addEventListener("change", () => {
+      const title = savedSel.value;
+      if (!title) return;
+      const found = loadSaved().find((p) => p.title === title);
+      if (found) promptTa.value = found.prompt;
+    });
+
+    const thinkPanel = document.createElement("div");
+    thinkPanel.className = "panel";
+    thinkPanel.innerHTML = `
+      <div class="panel-header">
+        <h2>Thinking 과정</h2>
+        <div class="row" style="gap:var(--space-3);">
+          <span id="at-think-count" class="muted"></span>
+          <button class="btn btn-ghost" id="at-think-copy" disabled>복사</button>
+        </div>
+      </div>
+      <div class="panel-body" id="at-thinking">
+        <div class="empty-state muted">[실행] 후 표시됩니다.</div>
+      </div>
+    `;
+    wrap.appendChild(thinkPanel);
+
+    document.getElementById("at-think-copy").addEventListener("click", copyThinking);
 
     const midPanel = document.createElement("div");
     midPanel.className = "panel";
@@ -306,7 +418,8 @@
 
       try {
         const data = await window.API.post("/api/agents/teams/run", { team_name, user_prompt });
-        document.getElementById("at-conv-id").textContent = `conversation_id: ${data.conversation_id}  ·  total ${data.total_elapsed_ms} ms`;
+        document.getElementById("at-conv-id").textContent = `conversation_id: ${data.conversation_id}  ·  total ${nf(data.total_elapsed_ms)} ms`;
+        renderThinking(data.thinking);
         renderTimeline(data.timeline || [], data.total_elapsed_ms);
         renderOutput(data);
         setStatus(status, "done", "완료");
@@ -324,6 +437,166 @@
     el.innerHTML = `<span class="dot"></span> ${text}`;
   }
 
+  // Thinking 카드 펼침 caret 아이콘
+  const THINK_CARET =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+
+  // 단계별 타임라인과 동일한 태그 배지(TEAM/TASK) + 이름 텍스트
+  function thinkBadge(kind, name) {
+    const wrap = document.createElement("span");
+    wrap.className = "think-tagline";
+    const tag = document.createElement("span");
+    tag.className = "tree-tag tag-" + kind;
+    tag.textContent = kind.toUpperCase();
+    const label = document.createElement("span");
+    label.className = "think-tagname";
+    label.textContent = name;
+    wrap.appendChild(tag);
+    wrap.appendChild(label);
+    return wrap;
+  }
+
+  // Thinking 과정 — 제공된 SQL 실행 결과를 단계별 readonly 카드로 표시.
+  // 복사 버튼이 사용할, 현재 화면에 렌더된 thinking 데이터.
+  let lastThinkingRows = [];
+
+  function renderThinking(thinking) {
+    const host = document.getElementById("at-thinking");
+    const count = document.getElementById("at-think-count");
+    const copyBtn = document.getElementById("at-think-copy");
+    host.innerHTML = "";
+    thinking = thinking || {};
+    lastThinkingRows = [];
+    if (copyBtn) copyBtn.disabled = true;
+
+    // f_agent_step_title 미존재 등 쿼리 실패 → ORA 오류를 그대로 노출
+    if (thinking.error) {
+      if (count) count.textContent = "";
+      const ta = document.createElement("textarea");
+      ta.readOnly = true;
+      ta.rows = 3;
+      ta.style.fontFamily = "var(--font-mono)";
+      ta.style.fontSize = "var(--fs-sm)";
+      ta.style.color = "var(--danger)";
+      ta.value = "Thinking 조회 실패:\n" + thinking.error;
+      host.appendChild(ta);
+      return;
+    }
+
+    const rows = thinking.rows || [];
+    if (count) count.textContent = `${rows.length} steps`;
+    if (!rows.length) {
+      host.innerHTML = '<div class="empty-state muted">표시할 thinking 단계가 없습니다.</div>';
+      return;
+    }
+    lastThinkingRows = rows;
+    if (copyBtn) copyBtn.disabled = false;
+
+    const stack = document.createElement("div");
+    stack.className = "stack";
+    rows.forEach((r) => {
+      const card = document.createElement("div");
+      card.className = "think-card";
+
+      // ① 제목 박스 (클릭하면 펼침/접힘) — step_no. step_title + 팀/태스크 배지
+      const headRow = document.createElement("button");
+      headRow.type = "button";
+      headRow.className = "think-row title think-head";
+      headRow.setAttribute("aria-expanded", "false");
+
+      const caret = document.createElement("span");
+      caret.className = "think-caret";
+      caret.innerHTML = THINK_CARET;
+
+      const headMain = document.createElement("div");
+      headMain.className = "think-head-main";
+
+      const titleLine = document.createElement("div");
+      titleLine.className = "think-title";
+      const no = r.step_no != null ? `${nf(r.step_no)}. ` : "";
+      titleLine.textContent = no + (r.step_title || "");
+
+      const pathLine = document.createElement("div");
+      pathLine.className = "think-path";
+      if (r.team_name) pathLine.appendChild(thinkBadge("team", r.team_name));
+      if (r.task_name) pathLine.appendChild(thinkBadge("task", r.task_name));
+
+      headMain.appendChild(titleLine);
+      headMain.appendChild(pathLine);
+      headRow.appendChild(caret);
+      headRow.appendChild(headMain);
+
+      // ② LLM 원문 (줄바꿈 유지) — 기본 접힘, 헤더 클릭 시 펼침
+      const promptRow = document.createElement("div");
+      promptRow.className = "think-row prompt";
+      promptRow.hidden = true;
+      promptRow.textContent = r.raw_prompt == null ? "" : String(r.raw_prompt);
+
+      headRow.addEventListener("click", () => {
+        const open = card.classList.toggle("open");
+        promptRow.hidden = !open;
+        headRow.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+
+      card.appendChild(headRow);
+      card.appendChild(promptRow);
+      stack.appendChild(card);
+    });
+    host.appendChild(stack);
+  }
+
+  // 화면에 표시된 thinking 단계들을 LLM 질의용 평문으로 직렬화.
+  function buildThinkingText(rows) {
+    const clean = (s) => (s == null ? "" : String(s).replace(/\r\n?/g, "\n").trim());
+    return rows.map((r, i) => {
+      const no = r.step_no != null ? r.step_no : i + 1;
+      const title = clean(r.step_title);
+      const path = [
+        r.team_name ? `TEAM: ${r.team_name}` : "",
+        r.task_name ? `TASK: ${r.task_name}` : "",
+      ].filter(Boolean).join("  |  ");
+      const body = clean(r.raw_prompt);
+      return [`### Step ${no}. ${title}`.trim(), path, "", body].filter((x, idx) => !(idx === 1 && !path)).join("\n");
+    }).join("\n\n---\n\n");
+  }
+
+  async function copyThinking() {
+    if (!lastThinkingRows.length) {
+      window.Toast.show("복사할 thinking 단계가 없습니다", "warn");
+      return;
+    }
+    const text = buildThinkingText(lastThinkingRows);
+    const ok = await copyToClipboard(text);
+    window.Toast.show(
+      ok ? `Thinking ${lastThinkingRows.length}단계 복사됨` : "복사 실패 — 직접 선택해 복사하세요",
+      ok ? "success" : "error"
+    );
+  }
+
+  // navigator.clipboard 우선, 비보안 컨텍스트(예: http://<ip>:8000)에서는 textarea 폴백.
+  async function copyToClipboard(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) { /* 폴백으로 진행 */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function renderTimeline(timeline, total) {
     const host = document.getElementById("at-timeline");
     host.innerHTML = "";
@@ -335,11 +608,23 @@
     const gantt = document.createElement("div");
     gantt.className = "gantt";
     timeline.forEach((seg) => {
+      const level = seg.level || 0;
       const row = document.createElement("div");
       row.className = "gantt-row";
       const label = document.createElement("div");
-      label.className = "gantt-label";
-      label.textContent = seg.step;
+      label.className = `gantt-label level-${level}`;
+      const name = seg.label || seg.step || "";
+      // 트리 들여쓰기 + Tab1 트리와 동일한 타입 배지 (Team→Agent→Task→Tool)
+      label.style.paddingLeft = `${level * 18}px`;
+      if (seg.type) {
+        const tag = document.createElement("span");
+        tag.className = "tree-tag tag-" + seg.type;
+        tag.textContent = seg.type.toUpperCase();
+        label.appendChild(tag);
+        label.appendChild(document.createTextNode(" "));
+      }
+      label.appendChild(document.createTextNode(name));
+      label.title = name;
       const track = document.createElement("div");
       track.className = "gantt-track";
       const bar = document.createElement("div");
@@ -351,13 +636,58 @@
       track.appendChild(bar);
       const dur = document.createElement("div");
       dur.className = "gantt-duration";
-      dur.textContent = `${seg.end_ms - seg.start_ms} ms`;
+      dur.textContent = `${nf(seg.end_ms - seg.start_ms)} ms`;
       row.appendChild(label);
       row.appendChild(track);
       row.appendChild(dur);
+
+      // 클릭 → 해당 Team/Agent/Task/Tool 속성 팝업 (Tab1 상세와 동일 데이터 재사용)
+      if (seg.type && name) {
+        row.classList.add("clickable");
+        row.title = `${name} — 클릭하여 속성 보기`;
+        row.addEventListener("click", () => showNodeModal({ kind: seg.type, name }));
+      }
       gantt.appendChild(row);
     });
     host.appendChild(gantt);
+  }
+
+  // 타임라인 노드 클릭 시 속성을 모달로 표시. pathFor/renderAttributes/detailCache 재사용.
+  async function showNodeModal(meta) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:680px;">
+        <div class="modal-header">
+          <h2>${meta.kind.toUpperCase()} — ${(meta.name || "").replace(/</g, "&lt;")}</h2>
+          <button class="btn btn-ghost" id="at-node-close">✕</button>
+        </div>
+        <div class="modal-body" id="at-node-body">
+          <div class="empty-state"><span class="spinner"></span> 조회 중...</div>
+        </div>
+      </div>
+    `;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#at-node-close").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+
+    const body = backdrop.querySelector("#at-node-body");
+    const cacheKey = `${meta.kind}:${meta.name}`;
+    try {
+      let detail = detailCache.get(cacheKey);
+      if (!detail) {
+        detail = await window.API.get(pathFor(meta));
+        detailCache.set(cacheKey, detail);
+      }
+      if (!backdrop.isConnected) return;
+      body.innerHTML = "";
+      body.appendChild(renderAttributes(detail, meta));
+    } catch (e) {
+      if (backdrop.isConnected) body.innerHTML = '<div class="empty-state muted">속성 조회 실패</div>';
+    }
   }
 
   function renderOutput(data) {
@@ -374,35 +704,62 @@
 
     const logs = data.raw_logs || {};
     const blocks = [
-      { title: "Conversation Prompts", rows: logs.conversation_prompts || [],
-        columns: [
-          { key: "prompt_id", label: "ID" },
-          { key: "role",      label: "Role" },
-          { key: "content",   label: "Content" },
-          { key: "ts",        label: "Timestamp" },
-        ] },
       { title: "Task History", rows: logs.task_history || [],
         columns: [
+          { key: "task_order", label: "Order", className: "metric" },
           { key: "task_name",  label: "Task" },
           { key: "status",     label: "Status" },
-          { key: "elapsed_ms", label: "Elapsed (ms)", className: "metric" },
+          { key: "input",      label: "Input" },
+          { key: "output",     label: "Output" },
+          { key: "elapsed_ms", label: "Elapsed (ms)", className: "metric", format: nf },
         ] },
       { title: "Tool History", rows: logs.tool_history || [],
         columns: [
+          { key: "task_order", label: "Order", className: "metric" },
           { key: "tool_name",  label: "Tool" },
-          { key: "calls",      label: "Calls",       className: "metric" },
-          { key: "elapsed_ms", label: "Elapsed (ms)", className: "metric" },
+          { key: "input",      label: "Input" },
+          { key: "output",     label: "Output" },
+          { key: "elapsed_ms", label: "Elapsed (ms)", className: "metric", format: nf },
         ] },
     ];
     blocks.forEach((b) => {
       const details = document.createElement("details");
       details.className = "log-block";
+
       const summary = document.createElement("summary");
-      summary.textContent = `${b.title} (${b.rows.length})`;
+      const titleSpan = document.createElement("span");
+      titleSpan.textContent = `${b.title} (${b.rows.length})`;
+      summary.appendChild(titleSpan);
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "btn btn-ghost btn-mini";
+      copyBtn.textContent = "복사";
+      copyBtn.style.float = "right";
+      copyBtn.disabled = !b.rows.length;
+      copyBtn.addEventListener("click", async (e) => {
+        e.preventDefault();   // summary 클릭 → details 토글 방지
+        e.stopPropagation();
+        const ok = await copyToClipboard(buildTableText(b.columns, b.rows));
+        window.Toast.show(
+          ok ? `${b.title} ${b.rows.length}행 복사됨` : "복사 실패 — 직접 선택해 복사하세요",
+          ok ? "success" : "error"
+        );
+      });
+      summary.appendChild(copyBtn);
+
       details.appendChild(summary);
-      details.appendChild(window.SimpleTable.create(b.columns, b.rows));
+      details.appendChild(window.SimpleTable.create(b.columns, b.rows, { className: "keep-case" }));
       host.appendChild(details);
     });
+  }
+
+  // 표 데이터를 LLM 질의용 평문으로 직렬화 — 레코드 단위 "라벨: 값" (여러 줄 값 보존).
+  function buildTableText(columns, rows) {
+    if (!rows.length) return "";
+    return rows.map((r) =>
+      columns.map((c) => `${c.label}: ${r[c.key] == null ? "" : String(r[c.key])}`).join("\n")
+    ).join("\n\n---\n\n");
   }
 
   function divFromHTML(html) { const d = document.createElement("div"); d.innerHTML = html; return d; }

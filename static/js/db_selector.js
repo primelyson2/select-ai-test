@@ -4,6 +4,7 @@
  *   - status === "unavailable" 인 항목은 disabled
  *   - 선택값은 localStorage("oai.db") 에 저장
  *   - 변경 시 'db:changed' CustomEvent dispatch
+ *   - window.DBSelector.reload() 로 목록 재조회 (DB 등록 화면에서 사용)
  */
 (function () {
   const KEY = "oai.db";
@@ -16,12 +17,7 @@
     localStorage.setItem(KEY, name);
   }
 
-  async function init() {
-    // selectEl 비어있는 동안에도 api.js 가 current() 호출하므로, 우선 stored 값을 노출.
-    window.DBSelector = {
-      current: () => selectEl.value || getStored(),
-    };
-
+  async function populate() {
     // 직접 fetch (API 래퍼가 자기 자신을 의존하지 않도록 raw fetch)
     let dbs = [];
     try {
@@ -34,6 +30,7 @@
       dbs = [];
     }
 
+    const prev = selectEl.value || getStored();
     selectEl.innerHTML = "";
     for (const db of dbs) {
       const opt = document.createElement("option");
@@ -43,11 +40,12 @@
       selectEl.appendChild(opt);
     }
 
-    // 복원 우선순위: localStorage → 첫 번째 활성 항목
-    const stored = getStored();
-    const isValid = dbs.some((d) => d.name === stored && d.status !== "unavailable");
+    // 복원 우선순위: 직전 선택 → localStorage → 첫 번째 활성 항목
+    const wanted = prev || getStored();
+    const isValid = dbs.some((d) => d.name === wanted && d.status !== "unavailable");
     if (isValid) {
-      selectEl.value = stored;
+      selectEl.value = wanted;
+      setStored(wanted);
     } else {
       const firstOk = dbs.find((d) => d.status !== "unavailable");
       if (firstOk) {
@@ -55,6 +53,17 @@
         setStored(firstOk.name);
       }
     }
+    return dbs;
+  }
+
+  async function init() {
+    // selectEl 비어있는 동안에도 api.js 가 current() 호출하므로, 우선 stored 값을 노출.
+    window.DBSelector = {
+      current: () => selectEl.value || getStored(),
+      reload: populate,
+    };
+
+    await populate();
 
     selectEl.addEventListener("change", () => {
       setStored(selectEl.value);
