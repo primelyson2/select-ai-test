@@ -59,12 +59,14 @@ resource "oci_core_instance" "app" {
     source_id   = local.image_id
   }
 
-  metadata = {
-    ssh_authorized_keys = var.ssh_public_key
-    user_data = base64encode(templatefile("${path.module}/cloud-init.tftpl", {
-      repo_url    = var.repo_url
-      repo_branch = var.repo_branch
-      app_port    = var.app_port
-    }))
-  }
+  metadata = merge(
+    {
+      user_data = base64encode(templatefile("${path.module}/cloud-init.tftpl", {
+        repo_url    = var.repo_url
+        repo_branch = var.repo_branch
+        app_port    = var.app_port
+      }))
+    },
+    var.ssh_public_key != "" ? { ssh_authorized_keys = var.ssh_public_key } : {}
+  )
 }

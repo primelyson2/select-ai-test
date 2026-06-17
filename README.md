@@ -156,7 +156,7 @@ git push -u origin main
 | **Instance shape / OCPU / 메모리** | 기본 `VM.Standard.E5.Flex` · 1 OCPU · 8 GB. *Always Free* 는 `VM.Standard.A1.Flex`(ARM, 권장) |
 | **Oracle Linux 버전** | 9 또는 8 |
 | **가용 도메인** | 비우면 첫 번째 AD 자동 사용 |
-| **SSH 공개키** | `~/.ssh/id_rsa.pub` 내용 붙여넣기 (인스턴스 SSH 접속용) |
+| **SSH public key** *(선택)* | `.pub` 파일 업로드(*Choose SSH key files*) 또는 붙여넣기(*Paste SSH keys*). 비우면 SSH 키 미등록 — 인스턴스 SSH 접속을 하려면 입력 권장 |
 
 **네트워크 접근** (기존 리소스 선택)
 | 변수 | 설명 |

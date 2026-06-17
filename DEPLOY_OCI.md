@@ -83,7 +83,7 @@ https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com
 
 - OCI 테넌시 + 인스턴스를 만들 **구획(Compartment)** 및 적절한 IAM 권한
 - 사용할 리전의 **컴퓨트 한도(서비스 리밋)** — 선택한 shape 기준 여유
-- **SSH 공개키** (`~/.ssh/id_rsa.pub`). 없으면 생성:
+- **SSH 공개키** (`~/.ssh/id_rsa.pub`) — *선택*. SSH 접속하려면 준비, 없으면 생성:
   ```bash
   ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
   cat ~/.ssh/id_rsa.pub
@@ -120,7 +120,7 @@ git push -u origin main
 | 컴퓨트 | **OCPU 수 / 메모리 GB** | Flex shape 전용 (고정 shape 은 무시) | 1 / 8 |
 | 컴퓨트 | **Oracle Linux 버전** | 9 또는 8 | `9` |
 | 컴퓨트 | **가용 도메인** | 비우면 첫 번째 AD 자동 사용 | (빈값) |
-| 컴퓨트 | **SSH 공개키** | 인스턴스 SSH 접속용 (한 줄) | — (필수) |
+| 컴퓨트 | **SSH public key** *(선택)* | `.pub` 파일 업로드 또는 붙여넣기 (비우면 미등록) | (빈값) |
 | 네트워크 | **Virtual cloud network (VCN)** | 사용할 **기존 VCN** 선택 | — (필수) |
 | 네트워크 | **Subnet** | 인스턴스가 들어갈 **기존 서브넷** 선택 | — (필수) |
 | 네트워크 | **공인 IP 할당** | public 서브넷이면 체크, private 이면 해제 | `true` |

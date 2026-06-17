@@ -56,7 +56,8 @@ variable "os_version" {
 
 variable "ssh_public_key" {
   type        = string
-  description = "인스턴스 SSH 접속용 공개키 (한 줄)"
+  description = "인스턴스 SSH 접속용 공개키 (선택 — 비우면 SSH 키 미등록)"
+  default     = ""
 }
 
 # ───── Network (기존 VCN/서브넷 선택) ─────
