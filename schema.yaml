@@ -98,8 +98,6 @@ variables:
     title: "SSH public key"
     description: "인스턴스 기본 사용자(opc)의 ~/.ssh/authorized_keys 에 추가될 공개키. 파일 업로드 또는 붙여넣기"
     required: false
-    additionalProps:
-      allowMultiple: true
 
   # ───── 네트워크 접근 (기존 VCN/서브넷 선택) ─────
   vcn_id:
