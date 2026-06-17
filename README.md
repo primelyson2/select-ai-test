@@ -116,11 +116,13 @@ GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle L
 
 | 파일 | 역할 |
 |---|---|
-| `main.tf` | provider + VCN/서브넷/IG/라우트/시큐리티리스트 + 컴퓨트 인스턴스 + 최신 Oracle Linux 이미지 조회 |
-| `variables.tf` | 입력 변수 (shape, OCPU/메모리, SSH 키, 포트, 허용 CIDR, 리포 URL/브랜치 등) |
-| `outputs.tf` | `app_url` / `public_ip` / `ssh_command` |
+| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + 최신 Oracle Linux 이미지 조회 |
+| `variables.tf` | 입력 변수 (인스턴스 이름, shape, OCPU/메모리, SSH 키, VCN/서브넷, 공인 IP, 포트, 리포 URL/브랜치) |
+| `outputs.tf` | `app_url` / `public_ip` / `private_ip` / `ssh_command` |
 | `cloud-init.tftpl` | 부팅 스크립트 — `git clone` → `uv sync` → systemd `select-ai-test` 서비스 등록·기동 → 방화벽 개방 |
 | `schema.yaml` | Resource Manager 변수 입력 UI |
+
+> **네트워크는 직접 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록(Security List)에서 **앱 포트(기본 8000)** 와 **SSH(22)** 인바운드를 미리 허용해 두어야 합니다. (VCN/서브넷이 없다면 OCI 콘솔의 *Networking → VCN* 에서 먼저 생성하세요.)
 
 ### 동작 방식 (Deploy 버튼)
 README 상단의 **Deploy to Oracle Cloud** 버튼은 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
@@ -145,14 +147,28 @@ git push -u origin main
 - "I have reviewed and accept the Oracle Terms of Use" 체크 → **Next**
 
 ### 단계 2. Configure variables
+
+**컴퓨트**
 | 변수 | 설명 |
 |---|---|
 | **구획 (Compartment)** | 리소스를 만들 구획 선택 |
+| **컴퓨트 인스턴스 표시 이름** | 생성될 인스턴스 이름 (기본 `select-ai-test`) |
+| **Instance shape / OCPU / 메모리** | 기본 `VM.Standard.E5.Flex` · 1 OCPU · 8 GB. *Always Free* 는 `VM.Standard.A1.Flex`(ARM, 권장) |
+| **Oracle Linux 버전** | 9 또는 8 |
 | **가용 도메인** | 비우면 첫 번째 AD 자동 사용 |
-| **Shape / OCPU / 메모리** | 기본 `VM.Standard.E4.Flex` · 1 OCPU · 8 GB. *Always Free* 는 `VM.Standard.A1.Flex`(ARM, 권장) 또는 `VM.Standard.E2.1.Micro` 선택 |
 | **SSH 공개키** | `~/.ssh/id_rsa.pub` 내용 붙여넣기 (인스턴스 SSH 접속용) |
-| **앱 포트** | 기본 `8000` |
-| **허용 CIDR** | 데모는 `0.0.0.0/0`. 운영은 사내 IP 대역으로 제한 권장 |
+
+**네트워크 접근** (기존 리소스 선택)
+| 변수 | 설명 |
+|---|---|
+| **Virtual cloud network (VCN)** | 사용할 **기존 VCN** 드롭다운 선택 |
+| **Subnet** | 인스턴스가 들어갈 **기존 서브넷** 선택 (선택한 VCN 기준으로 목록 필터) |
+| **공인 IP 할당** | public 서브넷이면 체크(기본), private 서브넷이면 해제 |
+| **앱 포트** | 기본 `8000` — 선택한 서브넷의 보안 목록에서 인바운드 허용 필요 |
+
+**애플리케이션 소스**
+| 변수 | 설명 |
+|---|---|
 | **Git 리포지토리 URL / 브랜치** | 기본값이 위 리포로 채워져 있음 |
 
 ### 단계 3. Review → Create
@@ -180,97 +196,6 @@ cd /opt/select-ai-test && git pull && ~/.local/bin/uv sync
 sudo systemctl restart select-ai-test
 ```
 또는 Resource Manager 스택에서 **Destroy** 후 다시 **Apply** 하면 새 인스턴스로 깨끗하게 재배포됩니다.
-
----
-
-## 4-B. 수동 VM 배포 (rsync)
-
-Resource Manager 없이 기존 VM 에 직접 올릴 때 사용합니다. 소스를 복사한 후 `scripts/*.sh` 로 설치 → 실행합니다. 비밀 파일 (`config.yaml`, `wallets/`) 은 전송 대상에서 제외되며, VM 측에서 별도로 작성·배치하거나 **[Database 관리]** 화면에서 등록합니다.
-
-### 사전 준비 (VM 측)
-- Oracle Linux 8/9, Ubuntu 22.04 등 (`python3 --version` 기준 **3.11 이상**)
-- 인터넷 접근 — uv 자동 설치 + `uv sync` 가 의존성을 받아옴
-
-### 단계 1. 로컬 → VM 소스 전송
-```bash
-# 로컬 (project/ 디렉토리에서)
-bash scripts/deploy.sh ec2-user@<vm-host> ~/oracle-ai-tool
-```
-내부적으로 `rsync` 사용. 다음 항목은 자동 제외 — `.venv/`, `__pycache__/`, `wallets/`, `config.yaml`, `.git/`, `*.log`.
-
-`rsync` 가 없거나 수동 전송하려면:
-```bash
-tar -czf oracle-ai-tool.tar.gz \
-  --exclude='.venv' --exclude='__pycache__' \
-  --exclude='wallets' --exclude='config.yaml' \
-  -C project .
-scp oracle-ai-tool.tar.gz ec2-user@<vm-host>:~/
-ssh ec2-user@<vm-host> "mkdir -p ~/oracle-ai-tool && tar -xzf ~/oracle-ai-tool.tar.gz -C ~/oracle-ai-tool"
-```
-
-### 단계 2. VM 초기 설치
-```bash
-ssh ec2-user@<vm-host>
-cd ~/oracle-ai-tool
-bash scripts/install.sh
-```
-`install.sh` 동작:
-1. Python 3.11+ 검증
-2. `uv` 미설치 시 자동 설치 (`~/.local/bin/uv`)
-3. `uv sync` 로 의존성 동기화
-4. `config.yaml`, `wallets/` 누락 여부 점검 (경고만)
-
-### 단계 3. 설정 파일 / Wallet 배치 *(선택 — 화면에서 등록 가능)*
-서버는 `config.yaml` 이 없어도 기동됩니다. 기동 후 **[메뉴 4] Database 관리** 화면에서
-Wallet zip 업로드 + 접속정보 입력으로 첫 DB 를 바로 등록할 수 있습니다 (권장).
-
-CLI 로 미리 배치하려면:
-```bash
-cp config.yaml.example config.yaml
-vi config.yaml                                    # ADB 접속정보 입력
-
-mkdir -p wallets/<db-name>
-unzip Wallet_<db-name>.zip -d wallets/<db-name>/  # 또는 scp 로 미리 업로드
-```
-> 화면에서 DB 를 추가/수정하면 서비스 실행 사용자가 `config.yaml` 과 `wallets/` 에
-> **쓰기 권한** 이 필요합니다 (systemd `User=` 와 작업 디렉토리 소유자 일치 확인).
-> 또한 런타임 등록 상태는 프로세스 메모리에 있으므로 `--workers 1` 로 실행하세요 (기본값).
-
-### 단계 4. 실행
-```bash
-bash scripts/run.sh                # foreground 실행 (0.0.0.0:8000)
-PORT=9000 bash scripts/run.sh      # 포트 변경
-```
-백그라운드 (간단):
-```bash
-nohup bash scripts/run.sh > server.log 2>&1 &
-```
-
-### 단계 5. 종료
-```bash
-bash scripts/stop.sh               # 기본 PORT=8000
-PORT=9000 bash scripts/stop.sh
-```
-
-### 단계 6. (선택) systemd 자동 시작
-```bash
-# 경로 / 사용자 환경에 맞게 수정
-vi scripts/oracle-ai-tool.service
-
-sudo cp scripts/oracle-ai-tool.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now oracle-ai-tool
-sudo systemctl status oracle-ai-tool
-journalctl -u oracle-ai-tool -f
-```
-
-### 단계 7. 방화벽 / 보안 그룹
-VM 측 8000 포트 inbound 허용. OCI VCN 의 Security List, AWS Security Group 등 환경에 맞게 설정.
-```bash
-# Oracle Linux firewalld 예시
-sudo firewall-cmd --add-port=8000/tcp --permanent
-sudo firewall-cmd --reload
-```
 
 ---
 

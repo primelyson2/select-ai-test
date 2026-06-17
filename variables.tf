@@ -17,13 +17,13 @@ variable "region" {
   description = "리전 (Resource Manager 자동 주입)"
 }
 
-variable "app_name" {
+# ───── Compute ─────
+variable "instance_display_name" {
   type        = string
-  description = "생성되는 리소스 이름 접두사"
+  description = "컴퓨트 인스턴스 표시 이름"
   default     = "select-ai-test"
 }
 
-# ───── Compute ─────
 variable "availability_domain" {
   type        = string
   description = "가용 도메인 이름 (비우면 첫 번째 AD 사용)"
@@ -33,7 +33,7 @@ variable "availability_domain" {
 variable "instance_shape" {
   type        = string
   description = "컴퓨트 shape"
-  default     = "VM.Standard.E4.Flex"
+  default     = "VM.Standard.E5.Flex"
 }
 
 variable "instance_ocpus" {
@@ -59,23 +59,27 @@ variable "ssh_public_key" {
   description = "인스턴스 SSH 접속용 공개키 (한 줄)"
 }
 
-# ───── Network ─────
+# ───── Network (기존 VCN/서브넷 선택) ─────
+variable "vcn_id" {
+  type        = string
+  description = "사용할 기존 가상 클라우드 네트워크(VCN) OCID"
+}
+
+variable "subnet_id" {
+  type        = string
+  description = "인스턴스 주 VNIC 가 생성될 기존 서브넷 OCID"
+}
+
+variable "assign_public_ip" {
+  type        = bool
+  description = "공인 IP 할당 여부 (public 서브넷이어야 함). private 서브넷이면 false"
+  default     = true
+}
+
 variable "app_port" {
   type        = number
-  description = "애플리케이션 포트"
+  description = "애플리케이션 포트 (선택한 서브넷의 보안 목록에서 인바운드 허용 필요)"
   default     = 8000
-}
-
-variable "app_allowed_cidr" {
-  type        = string
-  description = "앱 포트 접근 허용 CIDR"
-  default     = "0.0.0.0/0"
-}
-
-variable "ssh_allowed_cidr" {
-  type        = string
-  description = "SSH(22) 접근 허용 CIDR"
-  default     = "0.0.0.0/0"
 }
 
 # ───── Application source ─────

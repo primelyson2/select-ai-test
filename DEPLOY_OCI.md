@@ -21,14 +21,14 @@ https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=
    │  schema.yaml(입력 UI)                  │
    ▼                                        ▼
 [프로비저닝되는 리소스]                  [컴퓨트 부팅: cloud-init.tftpl]
-   • VCN (10.0.0.0/16)                      1. dnf install git python3.11 lsof
-   • Internet Gateway + Route Table         2. git clone <repo> → /opt/select-ai-test
-   • Security List (22, app_port 개방)       3. uv 설치 + uv sync (.venv)
-   • Subnet (10.0.1.0/24, 공인 IP)           4. systemd 서비스 등록·기동
-   • Compute (Oracle Linux 8/9)             5. firewalld 포트 개방
+   • Compute (Oracle Linux 8/9)             1. dnf install git python3.11 lsof
+     - 기존 VCN/서브넷 선택 사용             2. git clone <repo> → /opt/select-ai-test
+     - 공인 IP 옵션                          3. uv 설치 + uv sync (.venv)
+   (VCN/서브넷/보안목록은 생성하지 않음 —    4. systemd 서비스 등록·기동
+    사용자가 보유한 것을 선택)              5. firewalld 포트 개방
    │
    ▼
-[Outputs] app_url = http://<공인IP>:8000  →  접속 후 [Database 관리]에서 ADB 등록
+[Outputs] app_url = http://<IP>:8000  →  접속 후 [Database 관리]에서 ADB 등록
 ```
 
 핵심 설계: 앱이 **`config.yaml` 없이도 기동**되므로(빈 설정 허용), 배포 후 화면의 **[Database 관리]** 메뉴에서 Wallet zip 업로드만으로 첫 DB 를 등록할 수 있습니다. 비밀(접속정보·Wallet)을 Terraform/리포에 넣지 않습니다.
@@ -41,9 +41,9 @@ https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=
 
 | 파일 | 역할 |
 |---|---|
-| `main.tf` | provider + VCN/IG/Route/Security List/Subnet + 컴퓨트 인스턴스 + 최신 Oracle Linux 이미지 조회 |
-| `variables.tf` | 입력 변수 정의 (shape, OCPU/메모리, OS 버전, SSH 키, 포트, 허용 CIDR, 리포 URL/브랜치) |
-| `outputs.tf` | `app_url` / `public_ip` / `ssh_command` 출력 |
+| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + 최신 Oracle Linux 이미지 조회 |
+| `variables.tf` | 입력 변수 정의 (인스턴스 이름, shape, OCPU/메모리, OS 버전, SSH 키, VCN/서브넷, 공인 IP, 포트, 리포 URL/브랜치) |
+| `outputs.tf` | `app_url` / `public_ip` / `private_ip` / `ssh_command` 출력 |
 | `cloud-init.tftpl` | 부팅 부트스트랩 — `git clone → uv sync → systemd select-ai-test 등록·기동 → 방화벽 개방` |
 | `schema.yaml` | Resource Manager 변수 입력 UI (그룹/타입/기본값/출력 버튼) |
 
@@ -112,18 +112,22 @@ git push -u origin main
 
 ### 단계 2. Configure variables
 
-| 변수 | 설명 | 기본값 |
-|---|---|---|
-| **구획 (Compartment)** | 리소스를 만들 구획 | — (선택) |
-| **가용 도메인** | 비우면 첫 번째 AD 자동 사용 | (빈값) |
-| **Shape** | 컴퓨트 형상 | `VM.Standard.E4.Flex` |
-| **OCPU 수 / 메모리 GB** | Flex shape 전용 (Micro 는 무시) | 1 / 8 |
-| **Oracle Linux 버전** | 9 또는 8 | `9` |
-| **SSH 공개키** | 인스턴스 SSH 접속용 (한 줄) | — (필수) |
-| **앱 포트** | 서비스 포트 | `8000` |
-| **앱/SSH 허용 CIDR** | 접근 허용 대역 | `0.0.0.0/0` |
-| **Git 리포지토리 URL / 브랜치** | 소스 위치 | 위 리포 / `main` |
+| 그룹 | 변수 | 설명 | 기본값 |
+|---|---|---|---|
+| 일반 | **구획 (Compartment)** | 리소스를 만들 구획 | — (선택) |
+| 컴퓨트 | **컴퓨트 인스턴스 표시 이름** | 생성될 인스턴스 이름 | `select-ai-test` |
+| 컴퓨트 | **Instance shape** | 컴퓨트 형상 | `VM.Standard.E5.Flex` |
+| 컴퓨트 | **OCPU 수 / 메모리 GB** | Flex shape 전용 (고정 shape 은 무시) | 1 / 8 |
+| 컴퓨트 | **Oracle Linux 버전** | 9 또는 8 | `9` |
+| 컴퓨트 | **가용 도메인** | 비우면 첫 번째 AD 자동 사용 | (빈값) |
+| 컴퓨트 | **SSH 공개키** | 인스턴스 SSH 접속용 (한 줄) | — (필수) |
+| 네트워크 | **Virtual cloud network (VCN)** | 사용할 **기존 VCN** 선택 | — (필수) |
+| 네트워크 | **Subnet** | 인스턴스가 들어갈 **기존 서브넷** 선택 | — (필수) |
+| 네트워크 | **공인 IP 할당** | public 서브넷이면 체크, private 이면 해제 | `true` |
+| 네트워크 | **앱 포트** | 서비스 포트 (서브넷 보안목록에서 허용 필요) | `8000` |
+| 소스 | **Git 리포지토리 URL / 브랜치** | 소스 위치 | 위 리포 / `main` |
 
+> **네트워크는 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록에서 **앱 포트(8000)** 와 **SSH(22)** 인바운드를 미리 허용하세요.
 > **Always Free** 로 쓰려면 Shape 를 `VM.Standard.A1.Flex`(ARM, 권장) 또는 `VM.Standard.E2.1.Micro` 로 변경. oracledb 는 Thin 모드라 ARM 에서도 동작합니다.
 
 ### 단계 3. Review → Create → Apply
@@ -172,7 +176,7 @@ sudo systemctl restart select-ai-test
 |---|---|
 | RM 에서 zip 로드 실패 | 리포가 private 이거나 브랜치명이 다름. public 인지, `…/refs/heads/<branch>.zip` 의 브랜치가 맞는지 확인 |
 | `app_url` 접속 안 됨 (부팅 직후) | clone+sync 진행 중. 1~3분 후 재시도. `/var/log/select-ai-deploy.log` 확인 |
-| 접속 안 됨 (시간 지나도) | ① Security List 의 app_port 인그레스 ② 인스턴스 firewalld ③ 허용 CIDR ④ 서비스 상태(`systemctl status select-ai-test`) 순서로 점검 |
+| 접속 안 됨 (시간 지나도) | ① 선택한 서브넷의 보안 목록에 app_port/22 인바운드 허용 여부 ② 공인 IP 할당/서브넷 public 여부 ③ 인스턴스 firewalld ④ 서비스 상태(`systemctl status select-ai-test`) 순서로 점검 |
 | `git clone` 권한 오류 | private 리포. public 으로 전환하거나 토큰 방식 적용 필요 |
 | 이미지 조회 실패/빈 결과 | 선택한 shape 에서 해당 OL 버전 이미지가 없을 수 있음. OS 버전(9↔8) 또는 shape 변경 |
 | 컴퓨트 한도 초과 | 리전/구획의 서비스 리밋 부족. 다른 shape 선택 또는 한도 증설 요청 |
@@ -181,7 +185,7 @@ sudo systemctl restart select-ai-test
 
 ## 8. 보안 메모
 
-- 기본 허용 CIDR 이 `0.0.0.0/0` 입니다. **데모용**이며, 운영/외부 노출 시 SSH·앱 포트 CIDR 을 사내 IP 대역으로 좁히세요.
+- 인바운드 허용은 **선택한 기존 서브넷의 보안 목록(Security List/NSG)** 에서 관리합니다. 운영/외부 노출 시 앱 포트·SSH 인바운드를 사내 IP 대역으로 좁히세요.
 - 현재 앱은 **HTTP(비암호)·인증 없음** 입니다. 외부 공개 시 HTTPS 종단(nginx/Load Balancer)과 인증을 별도 구성하세요.
 - ADB 접속정보/Wallet 은 리포·Terraform 에 포함하지 않고, 배포 후 **[Database 관리]** 화면에서 등록합니다. 인스턴스 내부 `/opt/select-ai-test/config.yaml` 및 `wallets/` 에 저장되므로 인스턴스 접근 통제가 곧 비밀 보호입니다.
 
@@ -192,4 +196,4 @@ sudo systemctl restart select-ai-test
 - `terraform init` + `terraform validate` → **Success** (oracle/oci provider 기준)
 - `terraform fmt` → 포맷 정상
 - `cloud-init.tftpl` 템플릿 치환 변수 → `repo_url` / `repo_branch` / `app_port` 3개만(나머지 bash `$VAR` 는 보존)
-- `schema.yaml` → YAML 파싱 정상 (변수 13, 그룹 5)
+- `schema.yaml` → YAML 파싱 정상 (변수 14, 그룹 5)
