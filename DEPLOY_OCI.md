@@ -24,11 +24,14 @@ https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=
    • Compute (Oracle Linux 8/9)             1. dnf install git python3.11 lsof
      - 기존 VCN/서브넷 선택 사용             2. git clone <repo> → /opt/select-ai-test
      - 공인 IP 옵션                          3. uv 설치 + uv sync (.venv)
-   (VCN/서브넷/보안목록은 생성하지 않음 —    4. systemd 서비스 등록·기동
-    사용자가 보유한 것을 선택)              5. firewalld 포트 개방
+   • Load Balancer (공용, flexible)         4. systemd 서비스 등록·기동
+     - 443 리스너 = OCI 인증서(OCID) TLS    5. firewalld 포트 개방
+     - 백엔드 = 인스턴스 private_ip:8000
+   (VCN/서브넷/보안목록은 생성하지 않음)
    │
    ▼
-[Outputs] app_url = http://<IP>:8000  →  접속 후 [Database 관리]에서 ADB 등록
+[Outputs] https_url = https://<LB IP>  →  접속 후 [Database 관리]에서 ADB 등록
+          (HTTPS 443 → LB TLS 종단 → 인스턴스 8000)
 ```
 
 핵심 설계: 앱이 **`config.yaml` 없이도 기동**되므로(빈 설정 허용), 배포 후 화면의 **[Database 관리]** 메뉴에서 Wallet zip 업로드만으로 첫 DB 를 등록할 수 있습니다. 비밀(접속정보·Wallet)을 Terraform/리포에 넣지 않습니다.
@@ -41,9 +44,9 @@ https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=
 
 | 파일 | 역할 |
 |---|---|
-| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + 최신 Oracle Linux 이미지 조회 |
-| `variables.tf` | 입력 변수 정의 (인스턴스 이름, shape, OCPU/메모리, OS 버전, SSH 키, VCN/서브넷, 공인 IP, 포트, 리포 URL/브랜치) |
-| `outputs.tf` | `app_url` / `public_ip` / `private_ip` / `ssh_command` 출력 |
+| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + **HTTPS Load Balancer**(443 리스너=OCI 인증서 OCID, 백엔드 :8000, 헬스체크, 80→443 리다이렉트) + 최신 Oracle Linux 이미지 조회 |
+| `variables.tf` | 입력 변수 정의 (인스턴스 이름, shape, OCPU/메모리, OS 버전, SSH 키, VCN/서브넷, 공인 IP, 포트, **certificate_ocid/https_port/lb_***, 리포 URL/브랜치) |
+| `outputs.tf` | `https_url` / `load_balancer_ip` / `app_url` / `public_ip` / `private_ip` / `ssh_command` 출력 |
 | `cloud-init.tftpl` | 부팅 부트스트랩 — `git clone → uv sync → systemd select-ai-test 등록·기동 → 방화벽 개방` |
 | `schema.yaml` | Resource Manager 변수 입력 UI (그룹/타입/기본값/출력 버튼) |
 
@@ -125,17 +128,20 @@ git push -u origin main
 | 네트워크 | **Subnet** | 인스턴스가 들어갈 **기존 서브넷** 선택 | — (필수) |
 | 네트워크 | **공인 IP 할당** | public 서브넷이면 체크, private 이면 해제 | `true` |
 | 네트워크 | **앱 포트** | 서비스 포트 (서브넷 보안목록에서 허용 필요) | `8000` |
+| HTTPS | **Certificate OCID** *(필수)* | OCI Certificates 서비스 인증서 OCID (배포 리전 동일) | — |
+| HTTPS | **HTTPS 포트 / 80→443 리다이렉트** | LB TLS 종단 포트 / HTTP 리다이렉트 | `443` / 켬 |
+| HTTPS | **LB 서브넷(선택) / Private LB / 대역폭** | 비우면 인스턴스 서브넷 재사용 | (빈값) / 공용 / 10·10 |
 | 소스 | **Git 리포지토리 URL / 브랜치** | 소스 위치 | 위 리포 / `main` |
 
-> **네트워크는 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록에서 **앱 포트(8000)** 와 **SSH(22)** 인바운드를 미리 허용하세요.
+> **네트워크는 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록에서 **443(및 80)·8000·SSH(22)** 인바운드를 미리 허용하세요. ([§8 보안 메모](#8-보안-메모) 의 IAM 정책도 필수)
 > **Always Free** 로 쓰려면 Shape 를 `VM.Standard.A1.Flex`(ARM, 권장) 또는 `VM.Standard.E2.1.Micro` 로 변경. oracledb 는 Thin 모드라 ARM 에서도 동작합니다.
 
 ### 단계 3. Review → Create → Apply
 - **Create** 시 "Run apply" 를 켜두거나, 스택 생성 후 **Apply** 버튼 클릭
-- Apply Job 로그 끝의 **Outputs** 에서 `app_url`(예: `http://<공인IP>:8000`) 확인
+- Apply Job 로그 끝의 **Outputs** 에서 `https_url`(예: `https://<LB IP>`) 확인
 
 ### 단계 4. 첫 DB 등록
-- 브라우저로 `app_url` 접속 → 좌측 **[Database 관리]** 메뉴
+- 브라우저로 `https_url` 접속 → 좌측 **[Database 관리]** 메뉴
 - **+ 새 데이터베이스** → ADB Wallet(zip) 업로드 → 사용자/비밀번호/DSN 입력 → **저장** → **연결 테스트**
 - 헤더 드롭다운에 등록되면 각 메뉴에서 테스트 시작
 
@@ -176,7 +182,9 @@ sudo systemctl restart select-ai-test
 |---|---|
 | RM 에서 zip 로드 실패 | 리포가 private 이거나 브랜치명이 다름. public 인지, `…/refs/heads/<branch>.zip` 의 브랜치가 맞는지 확인 |
 | `app_url` 접속 안 됨 (부팅 직후) | clone+sync 진행 중. 1~3분 후 재시도. `/var/log/select-ai-deploy.log` 확인 |
-| 접속 안 됨 (시간 지나도) | ① 선택한 서브넷의 보안 목록에 app_port/22 인바운드 허용 여부 ② 공인 IP 할당/서브넷 public 여부 ③ 인스턴스 firewalld ④ 서비스 상태(`systemctl status select-ai-test`) 순서로 점검 |
+| `https_url` 접속 안 됨 | ① 서브넷 보안목록에 **443**(필요시 80) 인바운드 ② LB→인스턴스 **8000** 허용 ③ **IAM 정책**(아래) 미설정으로 인증서 미참조 ④ 콘솔 LB → Backend Sets health 가 OK 인지 확인 |
+| 서비스/소스 자체 접속 안 됨 | ① 서브넷 보안목록 app_port(8000)/22 ② 공인 IP/서브넷 public ③ 인스턴스 firewalld ④ `systemctl status select-ai-test` 순서로 점검 |
+| LB health "Critical" | 인스턴스 8000 미기동 또는 서브넷이 LB→인스턴스 8000 을 막음. `curl localhost:8000`(VM 내부)·보안목록 확인 |
 | `git clone` 권한 오류 | private 리포. public 으로 전환하거나 토큰 방식 적용 필요 |
 | 이미지 조회 실패/빈 결과 | 선택한 shape 에서 해당 OL 버전 이미지가 없을 수 있음. OS 버전(9↔8) 또는 shape 변경 |
 | 컴퓨트 한도 초과 | 리전/구획의 서비스 리밋 부족. 다른 shape 선택 또는 한도 증설 요청 |
@@ -185,8 +193,24 @@ sudo systemctl restart select-ai-test
 
 ## 8. 보안 메모
 
-- 인바운드 허용은 **선택한 기존 서브넷의 보안 목록(Security List/NSG)** 에서 관리합니다. 운영/외부 노출 시 앱 포트·SSH 인바운드를 사내 IP 대역으로 좁히세요.
-- 현재 앱은 **HTTP(비암호)·인증 없음** 입니다. 외부 공개 시 HTTPS 종단(nginx/Load Balancer)과 인증을 별도 구성하세요.
+### HTTPS 사전 준비 (필수 — Terraform 밖)
+LB/리스너/백엔드는 Terraform 이 만들지만, 다음 2가지는 **반드시 별도로** 준비해야 합니다.
+
+1. **보안 목록 인바운드** — 선택한 서브넷의 Security List/NSG 에 추가:
+   - `443/TCP`(80→443 리다이렉트 쓰면 `80/TCP` 도) ← 클라이언트 → LB
+   - `8000/TCP` ← LB → 인스턴스 (이미 열려 있으면 충족)
+   - `22/TCP` ← SSH (선택)
+2. **IAM 정책** — LB 가 Certificates 서비스 인증서를 읽도록 1회 생성(관리자):
+   ```
+   Allow any-user to read leaf-certificate-bundles in compartment <구획> where all { request.principal.type = 'loadbalancer' }
+   ```
+   (정확한 표현은 OCI 문서 "Load Balancer + Certificates Service" 로 확인. 정책 누락 시 LB 가 인증서를 못 읽어 리스너가 동작하지 않음)
+
+### 일반
+- 인바운드 허용은 **선택한 기존 서브넷의 보안 목록(Security List/NSG)** 에서 관리합니다. 운영/외부 노출 시 인바운드를 사내 IP 대역으로 좁히세요.
+- **Private 인증서 신뢰:** Private CA 발급 인증서는 브라우저가 기본 신뢰하지 않아 경고가 뜹니다. 클라이언트가 해당 **Private CA 루트를 신뢰 저장소에 추가**해야 경고 없이 접속됩니다(내부망용 정상).
+- TLS 는 LB 에서 종단되고 **LB→인스턴스 구간은 평문 HTTP(8000)** 입니다. 같은 VCN 사설 구간이라 일반적이나, 종단간 암호화가 필요하면 백엔드도 HTTPS 로 구성하세요.
+- **비용:** Flexible LB 는 시간당 과금(최소 10Mbps). 데모 후 미사용 시 **Destroy**.
 - ADB 접속정보/Wallet 은 리포·Terraform 에 포함하지 않고, 배포 후 **[Database 관리]** 화면에서 등록합니다. 인스턴스 내부 `/opt/select-ai-test/config.yaml` 및 `wallets/` 에 저장되므로 인스턴스 접근 통제가 곧 비밀 보호입니다.
 
 ---
@@ -196,4 +220,5 @@ sudo systemctl restart select-ai-test
 - `terraform init` + `terraform validate` → **Success** (oracle/oci provider 기준)
 - `terraform fmt` → 포맷 정상
 - `cloud-init.tftpl` 템플릿 치환 변수 → `repo_url` / `repo_branch` / `app_port` 3개만(나머지 bash `$VAR` 는 보존)
-- `schema.yaml` → YAML 파싱 정상 (변수 14, 그룹 5)
+- `schema.yaml` → YAML 파싱 정상 (변수 21, 그룹 6)
+- HTTPS Load Balancer(443 리스너=OCI 인증서 OCID) 추가 — `terraform validate` 로 `certificate_ids`/`ssl_configuration` 필드 검증됨

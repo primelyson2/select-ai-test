@@ -83,6 +83,48 @@ variable "app_port" {
   default     = 8000
 }
 
+# ───── HTTPS (Load Balancer) ─────
+variable "certificate_ocid" {
+  type        = string
+  description = "OCI Certificates 서비스의 인증서 OCID (LB 443 리스너가 참조)"
+}
+
+variable "https_port" {
+  type        = number
+  description = "HTTPS 리스너 포트"
+  default     = 443
+}
+
+variable "lb_subnet_id" {
+  type        = string
+  description = "LB 배치 서브넷 OCID (비우면 인스턴스 subnet_id 재사용)"
+  default     = ""
+}
+
+variable "lb_min_bandwidth_mbps" {
+  type        = number
+  description = "Flexible LB 최소 대역폭(Mbps)"
+  default     = 10
+}
+
+variable "lb_max_bandwidth_mbps" {
+  type        = number
+  description = "Flexible LB 최대 대역폭(Mbps)"
+  default     = 10
+}
+
+variable "lb_is_private" {
+  type        = bool
+  description = "LB 를 private 로 생성할지 여부 (기본 public)"
+  default     = false
+}
+
+variable "enable_http_redirect" {
+  type        = bool
+  description = "80 포트 리스너로 HTTPS(443) 리다이렉트 추가"
+  default     = true
+}
+
 # ───── Application source ─────
 variable "repo_url" {
   type        = string

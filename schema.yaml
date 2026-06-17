@@ -31,6 +31,16 @@ variableGroups:
       - assign_public_ip
       - app_port
 
+  - title: "HTTPS (Load Balancer)"
+    variables:
+      - certificate_ocid
+      - https_port
+      - lb_subnet_id
+      - enable_http_redirect
+      - lb_is_private
+      - lb_min_bandwidth_mbps
+      - lb_max_bandwidth_mbps
+
   - title: "애플리케이션 소스"
     variables:
       - repo_url
@@ -133,6 +143,58 @@ variables:
     maximum: 65535
     required: true
 
+  # ───── HTTPS (Load Balancer) ─────
+  certificate_ocid:
+    type: string
+    title: "Certificate OCID"
+    description: "OCI Certificates 서비스 인증서 OCID 를 붙여넣으세요 (LB 443 리스너가 참조). 배포 리전과 동일해야 함"
+    required: true
+
+  https_port:
+    type: number
+    title: "HTTPS 포트"
+    default: 443
+    minimum: 1
+    maximum: 65535
+    required: true
+
+  lb_subnet_id:
+    type: oci:core:subnet:id
+    title: "LB 서브넷 (선택)"
+    description: "LB 를 배치할 서브넷. 비우면 위에서 고른 인스턴스 서브넷을 재사용"
+    required: false
+    dependsOn:
+      compartmentId: ${compartment_ocid}
+      vcnId: ${vcn_id}
+
+  enable_http_redirect:
+    type: boolean
+    title: "80 → 443 리다이렉트"
+    description: "HTTP(80) 요청을 HTTPS 로 301 리다이렉트"
+    default: true
+    required: true
+
+  lb_is_private:
+    type: boolean
+    title: "Private LB"
+    description: "체크 시 사설 LB (공인 IP 미할당). 기본은 공용"
+    default: false
+    required: true
+
+  lb_min_bandwidth_mbps:
+    type: number
+    title: "LB 최소 대역폭 (Mbps)"
+    default: 10
+    minimum: 10
+    required: true
+
+  lb_max_bandwidth_mbps:
+    type: number
+    title: "LB 최대 대역폭 (Mbps)"
+    default: 10
+    minimum: 10
+    required: true
+
   # ───── 애플리케이션 소스 ─────
   repo_url:
     type: string
@@ -149,15 +211,25 @@ variables:
 outputGroups:
   - title: "애플리케이션"
     outputs:
+      - https_url
+      - load_balancer_ip
       - app_url
       - public_ip
       - private_ip
       - ssh_command
 
 outputs:
+  https_url:
+    type: link
+    title: "HTTPS URL (Load Balancer)"
+
+  load_balancer_ip:
+    type: string
+    title: "Load Balancer IP"
+
   app_url:
     type: link
-    title: "애플리케이션 URL"
+    title: "인스턴스 직접 URL (HTTP, 디버깅용)"
 
   public_ip:
     type: string
@@ -171,4 +243,4 @@ outputs:
     type: copyableString
     title: "SSH 접속 명령"
 
-primaryOutputButton: app_url
+primaryOutputButton: https_url

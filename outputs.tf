@@ -1,9 +1,20 @@
 locals {
   access_ip = var.assign_public_ip && oci_core_instance.app.public_ip != "" ? oci_core_instance.app.public_ip : oci_core_instance.app.private_ip
+  lb_ip     = oci_load_balancer_load_balancer.lb.ip_address_details[0].ip_address
+}
+
+output "https_url" {
+  description = "HTTPS 접속 URL (Load Balancer)"
+  value       = var.https_port == 443 ? "https://${local.lb_ip}" : "https://${local.lb_ip}:${var.https_port}"
+}
+
+output "load_balancer_ip" {
+  description = "Load Balancer 공인/사설 IP"
+  value       = local.lb_ip
 }
 
 output "app_url" {
-  description = "애플리케이션 접속 URL"
+  description = "인스턴스 직접 접속 URL (HTTP, 디버깅용)"
   value       = "http://${local.access_ip}:${var.app_port}"
 }
 

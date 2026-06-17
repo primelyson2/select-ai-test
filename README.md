@@ -116,9 +116,9 @@ GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle L
 
 | 파일 | 역할 |
 |---|---|
-| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + 최신 Oracle Linux 이미지 조회 |
-| `variables.tf` | 입력 변수 (인스턴스 이름, shape, OCPU/메모리, SSH 키, VCN/서브넷, 공인 IP, 포트, 리포 URL/브랜치) |
-| `outputs.tf` | `app_url` / `public_ip` / `private_ip` / `ssh_command` |
+| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + **HTTPS Load Balancer**(443 리스너·백엔드·헬스체크) + 최신 Oracle Linux 이미지 조회 |
+| `variables.tf` | 입력 변수 (인스턴스 이름, shape, OCPU/메모리, SSH 키, VCN/서브넷, 공인 IP, 포트, **인증서 OCID/HTTPS**, 리포 URL/브랜치) |
+| `outputs.tf` | `https_url` / `load_balancer_ip` / `app_url` / `public_ip` / `private_ip` / `ssh_command` |
 | `cloud-init.tftpl` | 부팅 스크립트 — `git clone` → `uv sync` → systemd `select-ai-test` 서비스 등록·기동 → 방화벽 개방 |
 | `schema.yaml` | Resource Manager 변수 입력 UI |
 
@@ -166,6 +166,17 @@ git push -u origin main
 | **공인 IP 할당** | public 서브넷이면 체크(기본), private 서브넷이면 해제 |
 | **앱 포트** | 기본 `8000` — 선택한 서브넷의 보안 목록에서 인바운드 허용 필요 |
 
+**HTTPS (Load Balancer)** — 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 으로 전달
+| 변수 | 설명 |
+|---|---|
+| **Certificate OCID** *(필수)* | OCI **Certificates 서비스** 인증서 OCID. 배포 리전과 동일해야 함 |
+| **HTTPS 포트** | 기본 `443` |
+| **LB 서브넷 (선택)** | 비우면 인스턴스 서브넷 재사용. 공용 LB 는 public 서브넷 필요 |
+| **80 → 443 리다이렉트** | 기본 체크 (HTTP→HTTPS 301) |
+| **Private LB / 대역폭** | 기본 공용 · 10/10 Mbps |
+
+> ⚠️ **사전 준비 2가지** (Terraform 밖, [§4 하단](#https-사전-준비-필수) 참조): ① 선택 서브넷 보안목록에 **443(및 80) 인바운드** 추가, ② LB 가 인증서를 읽도록 **IAM 정책** 1회 생성.
+
 **애플리케이션 소스**
 | 변수 | 설명 |
 |---|---|
@@ -173,10 +184,10 @@ git push -u origin main
 
 ### 단계 3. Review → Create
 - **Create** 후 자동으로 **Apply** 가 실행되도록 두거나, 스택 생성 후 **Apply** 버튼 클릭
-- Apply Job 로그 끝에서 **Outputs** 확인 → `app_url` (예: `http://<공인IP>:8000`) 클릭
+- Apply Job 로그 끝에서 **Outputs** 확인 → `https_url` (예: `https://<LB IP>`) 클릭
 
 ### 단계 4. 첫 DB 등록
-- 브라우저에서 `app_url` 접속 → 좌측 **[Database 관리]** 메뉴
+- 브라우저에서 `https_url` 접속 → 좌측 **[Database 관리]** 메뉴
 - **+ 새 데이터베이스** → ADB Wallet(zip) 업로드 → 사용자/비밀번호/DSN 입력 → **저장** → **연결 테스트**
 - 헤더 드롭다운에 등록한 DB 가 나타나면 각 메뉴에서 테스트 시작
 
@@ -187,6 +198,21 @@ git push -u origin main
 > systemctl status select-ai-test                    # 서비스 상태
 > journalctl -u select-ai-test -f                    # 앱 로그
 > ```
+
+### HTTPS 사전 준비 (필수)
+LB/리스너/백엔드는 Terraform 이 만들지만, 다음 2가지는 **Terraform 범위 밖**이라 별도로 준비해야 합니다.
+
+1. **보안 목록 인바운드** — 선택한 서브넷의 Security List 에 추가 (8000 열었던 방식과 동일):
+   - `443/TCP` (리다이렉트 쓰면 `80/TCP` 도) from `0.0.0.0/0`(또는 사내 대역) — 클라이언트 → LB
+   - `8000/TCP` — LB → 인스턴스 (이미 열려 있으면 충족)
+2. **IAM 정책** — LB 가 Certificates 서비스 인증서를 읽도록 1회 생성(관리자):
+   ```
+   Allow any-user to read leaf-certificate-bundles in compartment <구획> where all { request.principal.type = 'loadbalancer' }
+   ```
+   (정확한 표현은 OCI 문서 "Load Balancer + Certificates Service" 로 확인)
+
+> **Private 인증서 신뢰:** Private CA 발급 인증서는 브라우저가 기본 신뢰하지 않아 경고가 뜹니다. 클라이언트가 해당 **Private CA 루트를 신뢰 저장소에 추가**해야 경고 없이 접속됩니다(내부망용 정상 동작).
+> **검증:** `curl -vkI https://<LB IP>` 로 TLS 핸드셰이크/인증서 체인 확인, 콘솔 LB → Backend Sets 의 health 가 **OK** 인지 확인.
 
 ### 업데이트 / 재배포
 소스를 GitHub 에 다시 푸시한 뒤 인스턴스에서:
