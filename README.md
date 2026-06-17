@@ -6,11 +6,21 @@ Oracle Autonomous Database 23ai 의 **SELECT AI** (`DBMS_CLOUD_AI.GENERATE`), **
 
 ## ☁️ OCI 원클릭 배포 (Resource Manager)
 
-아래 버튼을 누르면 OCI Resource Manager 의 **Create Stack** 화면으로 이동하며, 이 리포의 Terraform 스택이 자동으로 로드됩니다. SSH 공개키와 구획만 지정하고 **Apply** 하면 Oracle Linux 인스턴스가 생성되고 부팅 시 소스를 clone → 의존성 설치 → 서비스 기동까지 자동 수행합니다.
+아래 버튼을 누르면 OCI Resource Manager 의 **Create Stack** 화면으로 이동하며, 이 리포의 Terraform 스택이 자동으로 로드됩니다. 부팅 시 소스를 clone → 의존성 설치 → 서비스 기동까지 자동 수행합니다. 배포 방식은 **두 가지** 중 선택합니다 — 둘 다 동일한 리포 zip 을 쓰며, **Create Stack 화면의 `Working directory` 드롭다운에서 어떤 폴더(`deploy/http` 또는 `deploy/https`)를 고르는지가 방식을 결정**합니다.
 
+### 옵션 A — HTTP (인증서 불필요, 간편) · 권장: 빠른 데모/내부 PoC
 [![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip)
 
-배포가 끝나면 스택의 **Application Information**(또는 Outputs)에 표시되는 `app_url` 로 접속 → **[Database 관리]** 메뉴에서 ADB Wallet 을 업로드해 첫 DB 를 등록합니다. 자세한 절차는 [§4. OCI Resource Manager 배포](#4-oci-resource-manager-배포) 또는 별도 문서 **[DEPLOY_OCI.md](DEPLOY_OCI.md)** 참조.
+버튼 클릭 → **Working directory = `deploy/http`** 선택 → 구획/네트워크만 지정하고 **Apply**. Load Balancer·인증서 없이 인스턴스 공인 IP 로 직접 접속합니다. Outputs 의 `app_url`(`http://<공인IP>:8000`) 로 접속. **사전 준비:** 선택한 서브넷 보안 목록에 **앱 포트(기본 8000) 인바운드**만 열면 됩니다. (평문 HTTP — 내부망/데모 전용)
+
+### 옵션 B — HTTPS (Load Balancer + 인증서)
+[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip)
+
+버튼 클릭 → **Working directory = `deploy/https`** 선택 → **인증서 OCID** 등 입력 후 **Apply**. 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 으로 전달합니다. Outputs 의 `https_url`(`https://<LB IP>`) 로 접속. **사전 준비:** 서브넷 보안 목록에 443(및 80) 인바운드 + LB 가 인증서를 읽도록 **IAM 정책** 1회 생성 ([§4.2 HTTPS 사전 준비](#https-사전-준비-필수) 참조).
+
+> 두 버튼의 링크(zipUrl)는 동일합니다 — 버튼만으로는 방식이 구분되지 않으며, **Working directory 선택이 HTTP/HTTPS 를 결정**합니다.
+
+배포가 끝나면 스택 Outputs 의 `app_url`(HTTP) 또는 `https_url`(HTTPS) 로 접속 → **[Database 관리]** 메뉴에서 ADB Wallet 을 업로드해 첫 DB 를 등록합니다. 자세한 절차는 [§4. OCI Resource Manager 배포](#4-oci-resource-manager-배포) 또는 별도 문서 **[DEPLOY_OCI.md](DEPLOY_OCI.md)** 참조.
 
 ---
 
@@ -112,24 +122,31 @@ kill -9 <PID>
 
 ## 4. OCI Resource Manager 배포
 
-GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle Linux 인스턴스를 만들고 앱을 기동합니다. 리포 루트의 Terraform 파일 4종이 스택을 구성합니다:
+GitHub 리포(`select-ai-test`)를 소스로 삼아 **원클릭**으로 Oracle Linux 인스턴스를 만들고 앱을 기동합니다. Terraform 스택은 **방식별로 폴더가 분리**되어 있으며, 각 폴더가 독립적인 완결 스택입니다 (각 폴더에 `main.tf`/`variables.tf`/`outputs.tf`/`schema.yaml`/`cloud-init.tftpl`).
+
+| 폴더 | 방식 | LB/인증서 | 접속 |
+|---|---|---|---|
+| **`deploy/http/`** | HTTP (간편) | 없음 | `http://<공인IP>:8000` (인스턴스 직접) |
+| **`deploy/https/`** | HTTPS (Load Balancer) | 공용 LB + 인증서 OCID | `https://<LB IP>` (LB TLS 종단 → 인스턴스 :8000) |
+
+각 폴더 공통 파일:
 
 | 파일 | 역할 |
 |---|---|
-| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + **HTTPS Load Balancer**(443 리스너·백엔드·헬스체크) + 최신 Oracle Linux 이미지 조회 |
-| `variables.tf` | 입력 변수 (인스턴스 이름, shape, OCPU/메모리, SSH 키, VCN/서브넷, 공인 IP, 포트, **인증서 OCID/HTTPS**, 리포 URL/브랜치) |
-| `outputs.tf` | `https_url` / `load_balancer_ip` / `app_url` / `public_ip` / `private_ip` / `ssh_command` |
-| `cloud-init.tftpl` | 부팅 스크립트 — `git clone` → `uv sync` → systemd `select-ai-test` 서비스 등록·기동 → 방화벽 개방 |
+| `main.tf` | provider + 컴퓨트 인스턴스(**기존 VCN/서브넷 선택**) + 최신 Oracle Linux 이미지 조회 (https 폴더는 추가로 **HTTPS Load Balancer** 443 리스너·백엔드·헬스체크) |
+| `variables.tf` | 입력 변수 (인스턴스 이름, shape, OCPU/메모리, SSH 키, VCN/서브넷, 공인 IP, 포트, 리포 URL/브랜치 — https 폴더는 추가로 **인증서 OCID/HTTPS/LB**) |
+| `outputs.tf` | http: `app_url`/`public_ip`/`private_ip`/`ssh_command` · https: 추가로 `https_url`/`load_balancer_ip` |
+| `cloud-init.tftpl` | 부팅 스크립트 — `git clone` → `uv sync` → systemd `select-ai-test` 서비스 등록·기동 → 방화벽 개방 (두 폴더 동일) |
 | `schema.yaml` | Resource Manager 변수 입력 UI |
 
-> **네트워크는 직접 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록(Security List)에서 **앱 포트(기본 8000)** 와 **SSH(22)** 인바운드를 미리 허용해 두어야 합니다. (VCN/서브넷이 없다면 OCI 콘솔의 *Networking → VCN* 에서 먼저 생성하세요.)
+> **네트워크는 직접 생성하지 않고 기존 VCN/서브넷을 선택**합니다. 선택한 서브넷의 보안 목록(Security List)에서 **앱 포트(기본 8000)** 와 **SSH(22)** 인바운드를 미리 허용해 두어야 합니다. (VCN/서브넷이 없다면 OCI 콘솔의 *Networking → VCN* 에서 먼저 생성하세요.) HTTPS 는 추가로 **443/80 인바운드 + IAM 정책** 이 필요합니다 ([HTTPS 사전 준비](#https-사전-준비-필수)).
 
 ### 동작 방식 (Deploy 버튼)
-README 상단의 **Deploy to Oracle Cloud** 버튼은 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
+README 상단의 두 **Deploy to Oracle Cloud** 버튼은 **동일한** 아래 URL 로 연결됩니다 — RM 이 GitHub 아카이브 zip 을 받아 스택으로 만듭니다.
 ```
 https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/primelyson2/select-ai-test/archive/refs/heads/main.zip
 ```
-> 다른 리포/브랜치로 바꾸려면 `zipUrl` 의 경로와 `…/refs/heads/<branch>.zip` 을 수정하세요.
+> 루트에는 `.tf` 가 없고 `deploy/http`·`deploy/https` 두 폴더에 들어 있으므로, RM 이 **Working directory** 드롭다운을 띄웁니다. 여기서 고른 폴더가 HTTP/HTTPS 방식을 결정합니다. (Deploy 버튼 URL 은 working directory 를 미리 지정할 수 없습니다.) 다른 리포/브랜치로 바꾸려면 `zipUrl` 의 경로와 `…/refs/heads/<branch>.zip` 을 수정하세요.
 
 ### 단계 0. (최초 1회) GitHub 에 소스 푸시
 이 `project/` 폴더가 **리포 루트**가 되도록 푸시합니다 (`config.yaml`·`wallets/` 는 `.gitignore` 로 자동 제외 — 비밀이 올라가지 않습니다).
@@ -144,9 +161,12 @@ git push -u origin main
 
 ### 단계 1. Deploy 버튼 클릭 → Stack information
 - README 상단 **Deploy to Oracle Cloud** 버튼 클릭 → OCI 로그인 → **Create stack** 진입 (Terraform 구성이 자동 로드됨)
+- **Working directory** 드롭다운에서 방식을 선택: **`deploy/http`**(간편) 또는 **`deploy/https`**(인증서/LB). 선택한 폴더의 `schema.yaml` 에 따라 다음 단계의 변수 폼이 달라집니다.
 - "I have reviewed and accept the Oracle Terms of Use" 체크 → **Next**
 
 ### 단계 2. Configure variables
+
+> 아래 **컴퓨트 / 네트워크 접근 / 애플리케이션 소스** 변수는 두 방식 공통입니다. **HTTPS (Load Balancer)** 변수는 `deploy/https` 를 고른 경우에만 나타납니다 (HTTP 방식은 이 표를 건너뛰고 바로 Apply).
 
 **컴퓨트**
 | 변수 | 설명 |
@@ -166,7 +186,7 @@ git push -u origin main
 | **공인 IP 할당** | public 서브넷이면 체크(기본), private 서브넷이면 해제 |
 | **앱 포트** | 기본 `8000` — 선택한 서브넷의 보안 목록에서 인바운드 허용 필요 |
 
-**HTTPS (Load Balancer)** — 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 으로 전달
+**HTTPS (Load Balancer)** *(— `deploy/https` 전용. HTTP 방식은 없음)* — 공용 LB 가 TLS 종단 → 인스턴스 `:8000` 으로 전달
 | 변수 | 설명 |
 |---|---|
 | **Certificate OCID** *(필수)* | OCI **Certificates 서비스** 인증서 OCID. 배포 리전과 동일해야 함 |
@@ -184,10 +204,10 @@ git push -u origin main
 
 ### 단계 3. Review → Create
 - **Create** 후 자동으로 **Apply** 가 실행되도록 두거나, 스택 생성 후 **Apply** 버튼 클릭
-- Apply Job 로그 끝에서 **Outputs** 확인 → `https_url` (예: `https://<LB IP>`) 클릭
+- Apply Job 로그 끝에서 **Outputs** 확인 → **HTTP**: `app_url`(예: `http://<공인IP>:8000`) · **HTTPS**: `https_url`(예: `https://<LB IP>`) 클릭
 
 ### 단계 4. 첫 DB 등록
-- 브라우저에서 `https_url` 접속 → 좌측 **[Database 관리]** 메뉴
+- 브라우저에서 위 URL(`app_url` 또는 `https_url`) 접속 → 좌측 **[Database 관리]** 메뉴
 - **+ 새 데이터베이스** → ADB Wallet(zip) 업로드 → 사용자/비밀번호/DSN 입력 → **저장** → **연결 테스트**
 - 헤더 드롭다운에 등록한 DB 가 나타나면 각 메뉴에서 테스트 시작
 
@@ -200,6 +220,8 @@ git push -u origin main
 > ```
 
 ### HTTPS 사전 준비 (필수)
+> `deploy/https` 방식에만 해당합니다. **HTTP(`deploy/http`) 방식은 인증서·IAM 정책·LB 가 전혀 필요 없고**, 선택한 서브넷 보안 목록에 **앱 포트(기본 8000) 인바운드**만 열면 됩니다.
+
 LB/리스너/백엔드는 Terraform 이 만들지만, 다음 2가지는 **Terraform 범위 밖**이라 별도로 준비해야 합니다.
 
 1. **보안 목록 인바운드** — 선택한 서브넷의 Security List 에 추가 (8000 열었던 방식과 동일):
@@ -240,11 +262,20 @@ sudo systemctl restart select-ai-test
 ```
 project/   (= GitHub 리포 select-ai-test 루트)
 ├─ README.md                  # 본 문서 (상단에 Deploy to Oracle Cloud 버튼)
-├─ main.tf                    # OCI RM — provider/네트워크/컴퓨트/이미지
-├─ variables.tf               # OCI RM — 입력 변수
-├─ outputs.tf                 # OCI RM — app_url/public_ip/ssh_command
-├─ cloud-init.tftpl           # OCI RM — 부팅 부트스트랩(clone→uv sync→systemd)
-├─ schema.yaml                # OCI RM — 변수 입력 UI
+├─ DEPLOY_OCI.md              # OCI RM 배포 상세 가이드
+├─ deploy/                    # OCI RM 스택 (방식별 폴더 — RM Working directory 로 선택)
+│   ├─ http/                  # HTTP 변형 (LB/인증서 없음, 인스턴스 직접 :app_port)
+│   │   ├─ main.tf            #   provider/컴퓨트/이미지
+│   │   ├─ variables.tf       #   입력 변수 (LB/인증서 변수 없음)
+│   │   ├─ outputs.tf         #   app_url/public_ip/private_ip/ssh_command
+│   │   ├─ schema.yaml        #   변수 입력 UI (HTTPS 그룹 없음)
+│   │   └─ cloud-init.tftpl   #   부팅 부트스트랩(clone→uv sync→systemd)
+│   └─ https/                 # HTTPS 변형 (공용 LB + 인증서 OCID, TLS 종단)
+│       ├─ main.tf            #   provider/컴퓨트/이미지 + HTTPS Load Balancer
+│       ├─ variables.tf       #   입력 변수 (+ 인증서 OCID/HTTPS/LB)
+│       ├─ outputs.tf         #   https_url/load_balancer_ip/app_url/…
+│       ├─ schema.yaml        #   변수 입력 UI (HTTPS 그룹 포함)
+│       └─ cloud-init.tftpl   #   부팅 부트스트랩 (http 와 동일)
 ├─ pyproject.toml             # uv 관리 의존성 (fastapi, oracledb, pyyaml, uvicorn, python-multipart)
 ├─ config.yaml.example        # 설정 샘플 — config.yaml 로 복사 후 작성
 ├─ config.yaml                # 실제 설정 (git ignored — 비밀 포함)
