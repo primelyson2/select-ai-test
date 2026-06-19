@@ -1,10 +1,24 @@
 /** views/profile_test.js — 메뉴 [2] AI Profile Test (2 탭, 상하구조). */
 (function () {
   let chartInstance = null;
+  let REGIONS = [];  // region 속성 드롭다운 후보 (project/regions.txt)
+  let MODELS = {};   // region -> model 후보 (project/models.txt)
 
   async function render() {
     const main = document.getElementById("main");
     main.innerHTML = "";
+
+    // region / model 후보 목록 — 실패해도 화면은 계속 (드롭다운 대신 자유 입력으로 폴백)
+    try {
+      REGIONS = await window.API.get("/api/regions");
+    } catch (e) {
+      REGIONS = [];
+    }
+    try {
+      MODELS = await window.API.get("/api/models");
+    } catch (e) {
+      MODELS = {};
+    }
 
     const title = document.createElement("div");
     title.className = "view-title";
@@ -111,13 +125,20 @@
               currentProfileName = row.profile_name;
               currentAttrs = attrs;
               attrHost.innerHTML = "";
+              // region <-> model 셀 연동용 컨텍스트 (속성 테이블 1개당 1개)
+              const regionAttr = attrs.find((a) => a.attribute_name === "region");
+              const attrCtx = {
+                regionValue: regionAttr ? String(regionAttr.attribute_value ?? "") : "",
+                modelSelect: null,        // model 드롭다운 element (있으면 region 변경 시 갱신)
+                syncModelOptions: null,   // model 드롭다운 옵션 재계산 함수
+              };
               attrHost.appendChild(window.SimpleTable.create(
                 [
                   { key: "attribute_name", label: "Attribute" },
                   {
                     key: "attribute_value",
                     label: "Value",
-                    format: (_v, attr) => buildEditableValueCell(row.profile_name, attr),
+                    format: (_v, attr) => buildEditableValueCell(row.profile_name, attr, attrCtx),
                   },
                 ],
                 attrs
@@ -434,21 +455,87 @@
 
   function div(html) { const d = document.createElement("div"); d.innerHTML = html; return d; }
 
-  // 속성 Value 셀 — textarea + [적용] 버튼. 클릭 시 DBMS_CLOUD_AI.SET_ATTRIBUTE 호출.
-  function buildEditableValueCell(profileName, attr) {
+  // 드롭다운 공통 스타일
+  function styleSelect(sel) {
+    sel.style.flex = "1";
+    sel.style.fontFamily = "var(--font-mono)";
+    sel.style.fontSize = "var(--fs-sm)";
+    sel.style.minHeight = "32px";
+    return sel;
+  }
+
+  // <select> 옵션을 options 로 채우고, 현재 값이 없으면 맨 앞에 추가해 유실 방지.
+  function fillSelectOptions(sel, options, currentValue) {
+    const cur = currentValue == null ? "" : String(currentValue);
+    const opts = options.slice();
+    if (cur && !opts.includes(cur)) opts.unshift(cur);
+    sel.innerHTML = "";
+    opts.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      sel.appendChild(o);
+    });
+    sel.value = cur;
+  }
+
+  // region 속성 전용 입력 — project/regions.txt 후보를 드롭다운으로.
+  // 변경 시 같은 테이블의 model 드롭다운 옵션을 region 에 맞게 갱신한다.
+  function buildRegionSelect(currentValue, ctx) {
+    const sel = styleSelect(document.createElement("select"));
+    fillSelectOptions(sel, REGIONS, currentValue);
+    sel.addEventListener("change", () => {
+      if (ctx) {
+        ctx.regionValue = sel.value;
+        if (typeof ctx.syncModelOptions === "function") ctx.syncModelOptions();
+      }
+    });
+    return sel;
+  }
+
+  // model 속성 전용 입력 — 현재 선택된 region(ctx.regionValue) 의 후보를 드롭다운으로.
+  function buildModelSelect(currentValue, ctx) {
+    const sel = styleSelect(document.createElement("select"));
+    const apply = () => {
+      const region = (ctx && ctx.regionValue) || "";
+      const list = (MODELS && MODELS[region]) || [];
+      // region 변경 시에는 select 의 현재 값을, 최초 렌더 시에는 속성 값을 보존
+      const keep = sel.options.length ? sel.value : currentValue;
+      fillSelectOptions(sel, list, keep);
+    };
+    apply();
+    if (ctx) {
+      ctx.modelSelect = sel;
+      ctx.syncModelOptions = apply;
+    }
+    return sel;
+  }
+
+  // 속성 Value 셀 — 입력(region/model=드롭다운, 그 외=textarea) + [적용] 버튼.
+  // 클릭 시 DBMS_CLOUD_AI.SET_ATTRIBUTE 호출.
+  function buildEditableValueCell(profileName, attr, ctx) {
     const wrap = document.createElement("div");
     wrap.className = "row";
     wrap.style.gap = "6px";
     wrap.style.alignItems = "flex-start";
 
-    const ta = document.createElement("textarea");
-    ta.rows = 1;
-    ta.value = attr.attribute_value == null ? "" : String(attr.attribute_value);
-    ta.style.flex = "1";
-    ta.style.fontFamily = "var(--font-mono)";
-    ta.style.fontSize = "var(--fs-sm)";
-    ta.style.resize = "vertical";
-    ta.style.minHeight = "32px";
+    const isRegion = attr.attribute_name === "region" && REGIONS.length > 0;
+    const isModel = attr.attribute_name === "model" && MODELS && Object.keys(MODELS).length > 0;
+    let input;
+    if (isRegion) {
+      input = buildRegionSelect(attr.attribute_value, ctx);
+    } else if (isModel) {
+      input = buildModelSelect(attr.attribute_value, ctx);
+    } else {
+      input = document.createElement("textarea");
+      input.rows = 1;
+      input.value = attr.attribute_value == null ? "" : String(attr.attribute_value);
+      input.style.flex = "1";
+      input.style.fontFamily = "var(--font-mono)";
+      input.style.fontSize = "var(--fs-sm)";
+      input.style.resize = "vertical";
+      input.style.minHeight = "32px";
+    }
 
     const btn = document.createElement("button");
     btn.className = "btn btn-ghost";
@@ -456,7 +543,7 @@
     btn.style.flexShrink = "0";
 
     btn.addEventListener("click", async () => {
-      const newVal = ta.value;
+      const newVal = input.value;
       btn.disabled = true;
       const prev = btn.innerHTML;
       btn.innerHTML = '<span class="spinner"></span>';
@@ -475,7 +562,7 @@
       }
     });
 
-    wrap.appendChild(ta);
+    wrap.appendChild(input);
     wrap.appendChild(btn);
     return wrap;
   }

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -19,6 +20,53 @@ from app.deps import current_db
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["profiles"])
+
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent
+# region 드롭다운 후보 — project/regions.txt (한 줄 1개, '#' 주석/빈 줄 무시)
+REGIONS_FILE = _DATA_DIR / "regions.txt"
+# region 별 model 후보 — project/models.txt ('#region' 섹션 헤더 + 모델 줄)
+MODELS_FILE = _DATA_DIR / "models.txt"
+
+
+@router.get("/regions")
+async def list_regions() -> list[str]:
+    try:
+        lines = REGIONS_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logger.warning("regions.txt 읽기 실패: %s", exc)
+        return []
+    seen: list[str] = []
+    for line in lines:
+        r = line.strip()
+        if not r or r.startswith("#") or r in seen:
+            continue
+        seen.append(r)
+    return seen
+
+
+@router.get("/models")
+async def list_models() -> dict[str, list[str]]:
+    """region -> 사용 가능한 model 목록. '#region' 헤더로 섹션을 구분한다."""
+    try:
+        lines = MODELS_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logger.warning("models.txt 읽기 실패: %s", exc)
+        return {}
+    result: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            body = s[1:]
+            # '#region' = 섹션 헤더 / '# 주석' · '##' = 주석(섹션 영향 없음)
+            if body and not body[0].isspace() and not body.startswith("#"):
+                current = result.setdefault(body.strip(), [])
+            continue
+        if current is not None and s not in current:
+            current.append(s)
+    return result
 
 
 @router.get("/profiles")
