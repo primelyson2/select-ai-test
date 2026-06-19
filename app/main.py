@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import db, deps
 from app.config import load_config
-from app.routers import agents, databases, objects, profiles
+from app.routers import agents, chat, databases, objects, profiles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
@@ -38,6 +38,7 @@ app = FastAPI(title="Oracle AI Database Test Tool", lifespan=lifespan)
 app.include_router(databases.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 app.include_router(objects.router, prefix="/api")
 
 

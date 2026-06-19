@@ -39,15 +39,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import db
 from app.deps import current_db
+from app.plsql import build_run_team_block, first_line as _first_line, read_clob
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
-
-
-def _first_line(exc: Exception) -> str:
-    s = str(exc).strip()
-    return s.splitlines()[0] if s else "execution failed"
 
 
 def _safe_parse_json(raw: Any) -> Any:
@@ -337,21 +333,8 @@ async def set_tool_attribute(name: str, attribute_name: str, payload: dict,
 # 실행
 # ====================================================================
 
-_RUN_PLSQL = """
-DECLARE
-    v_result  CLOB;
-    v_conv_id VARCHAR2(4000);
-BEGIN
-    v_conv_id := DBMS_CLOUD_AI.CREATE_CONVERSATION();
-    v_result := DBMS_CLOUD_AI_AGENT.RUN_TEAM(
-        team_name   => :team_name,
-        user_prompt => :user_prompt,
-        params      => '{"conversation_id": "' || v_conv_id || '"}'
-    );
-    :out_conv := v_conv_id;
-    :out_result := v_result;
-END;
-"""
+# 프롬프트 전체를 :user_prompt 바인드로, 매번 새 conversation 으로 실행.
+_RUN_PLSQL = build_run_team_block()
 
 
 @router.post("/teams/run")
@@ -371,35 +354,25 @@ async def run_team(payload: dict, database: str = Depends(current_db)) -> dict:
         async with pool.acquire() as conn:
             with conn.cursor() as cur:
                 out_conv = cur.var(str, size=4000)
-                out_result = cur.var(oracledb.DB_TYPE_CLOB)
+                out_answer = cur.var(oracledb.DB_TYPE_CLOB)
                 await cur.execute(
                     _RUN_PLSQL,
                     {
                         "team_name": team_name,
                         "user_prompt": user_prompt,
                         "out_conv": out_conv,
-                        "out_result": out_result,
+                        "out_answer": out_answer,
                     },
                 )
                 conv_id = out_conv.getvalue() or ""
-                lob = out_result.getvalue()
-                if lob is None:
-                    result_str = ""
-                elif hasattr(lob, "read"):
-                    r = lob.read()
-                    if hasattr(r, "__await__"):
-                        result_str = await r
-                    else:
-                        result_str = r
-                else:
-                    result_str = str(lob)
+                result_str = await read_clob(out_answer.getvalue())
             await conn.commit()
     except Exception as exc:
         logger.warning("RUN_TEAM failed: db=%s team=%s: %s", database, team_name, _first_line(exc))
         raise HTTPException(status_code=400, detail={"error": _first_line(exc), "team": team_name})
 
     total_ms = int((time.perf_counter() - t0) * 1000)
-    timeline_payload = await _build_timeline_and_logs(database, conv_id)
+    timeline_payload = await build_timeline_and_logs(database, conv_id)
     return {
         "conversation_id": conv_id,
         "total_elapsed_ms": total_ms,
@@ -412,7 +385,7 @@ async def run_team(payload: dict, database: str = Depends(current_db)) -> dict:
 
 @router.get("/conversations/{conv_id}/timeline")
 async def conversation_timeline(conv_id: str, database: str = Depends(current_db)) -> dict:
-    return await _build_timeline_and_logs(database, conv_id)
+    return await build_timeline_and_logs(database, conv_id)
 
 
 # ====================================================================
@@ -473,8 +446,11 @@ async def _fetch_thinking(database: str, conv_id: str) -> dict:
         return {"rows": [], "error": msg}
 
 
-async def _build_timeline_and_logs(database: str, conv_id: str) -> dict:
-    """conversation_id 로 team_exec_id 를 찾아 task/tool 이력을 시간축에 맞춤."""
+async def build_timeline_and_logs(database: str, conv_id: str) -> dict:
+    """conversation_id 로 team_exec_id 를 찾아 task/tool 이력을 시간축에 맞춤.
+
+    agents.run_team / conversations 타임라인 + chat.send 가 공유한다.
+    """
     if not conv_id:
         return {"timeline": [], "thinking": {"rows": [], "error": None}, "raw_logs": {
             "conversation_prompts": [], "task_history": [], "tool_history": [],

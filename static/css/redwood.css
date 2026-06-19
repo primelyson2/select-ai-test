@@ -383,6 +383,13 @@ label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
   display: flex; align-items: center; justify-content: space-between;
 }
 .modal-body { padding: var(--space-4); overflow: auto; }
+.modal-footer {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.modal-body input[type="text"],
+.modal-body select,
+.modal-body textarea { width: 100%; }
 
 /* --- Misc --- */
 .badge {

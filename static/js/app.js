@@ -6,6 +6,7 @@
     objects:   { render: () => window.Views.objectMeta(),     label: "AI Profile Object Meta" },
     profiles:  { render: () => window.Views.profileTest(),    label: "AI Profile Test" },
     agents:    { render: () => window.Views.agentTest(),      label: "AI Agent Team Test" },
+    chat:      { render: () => window.Views.aiChat(),         label: "AI Chat" },
     databases: { render: () => window.Views.databaseAdmin(),  label: "Database 관리" },
   };
   const DEFAULT_ROUTE = "profiles";
