@@ -4,6 +4,9 @@
   // 키: "<kind>:<name>". DB 전환 시 뷰 전체가 재렌더되므로 render() 진입 때 비운다.
   const detailCache = new Map();
 
+  // profile_name 속성 드롭다운 후보 — 현재 DB 의 AI Profile 목록 (/api/profiles).
+  let PROFILE_NAMES = [];
+
   // 숫자 천단위 콤마 (null/빈값은 그대로).
   const nf = (v) => (v == null || v === "") ? v : Number(v).toLocaleString();
 
@@ -11,6 +14,14 @@
     const main = document.getElementById("main");
     main.innerHTML = "";
     detailCache.clear();
+
+    // profile_name 드롭다운용 Profile 목록 — 실패해도 화면은 계속 (자유 입력 폴백)
+    try {
+      const profiles = await window.API.get("/api/profiles");
+      PROFILE_NAMES = (profiles || []).map((p) => p.profile_name).filter(Boolean);
+    } catch (e) {
+      PROFILE_NAMES = [];
+    }
 
     const title = document.createElement("div");
     title.className = "view-title";
@@ -198,7 +209,28 @@
     return wrap;
   }
 
-  // 속성 Value 셀 — textarea (auto-grow) + 저장 버튼.
+  // profile_name 속성 전용 입력 — 현재 DB 의 AI Profile 목록을 드롭다운으로.
+  // 현재 값이 목록에 없으면 그 값을 옵션으로 추가해 유실 방지.
+  function buildProfileSelect(currentValue) {
+    const sel = document.createElement("select");
+    sel.style.flex = "1";
+    sel.style.fontFamily = "var(--font-mono)";
+    sel.style.fontSize = "var(--fs-sm)";
+    sel.style.minHeight = "32px";
+    const cur = currentValue == null ? "" : String(currentValue);
+    const options = PROFILE_NAMES.slice();
+    if (cur && !options.includes(cur)) options.unshift(cur);
+    options.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p;
+      o.textContent = p;
+      sel.appendChild(o);
+    });
+    sel.value = cur;
+    return sel;
+  }
+
+  // 속성 Value 셀 — 입력(profile_name=드롭다운, 그 외=textarea) + 저장 버튼.
   // 클릭 시 DBMS_CLOUD_AI_AGENT.SET_ATTRIBUTE 호출.
   function buildAttrValueCell(meta, attr) {
     const wrap = document.createElement("div");
@@ -206,13 +238,37 @@
     wrap.style.gap = "6px";
     wrap.style.alignItems = "flex-start";
 
-    const ta = document.createElement("textarea");
-    ta.rows = 1;
-    ta.className = "textarea-auto";
-    ta.value = attr.attribute_value == null ? "" : String(attr.attribute_value);
-    ta.style.flex = "1";
-    ta.style.fontFamily = "var(--font-mono)";
-    ta.style.fontSize = "var(--fs-sm)";
+    const isProfile = attr.attribute_name === "profile_name" && PROFILE_NAMES.length > 0;
+    const isToolParams = attr.attribute_name === "tool_params" && PROFILE_NAMES.length > 0;
+    let input;
+    let profileLink = null;
+    let belowEl = null;  // 입력 아래 추가 요소 (tool_params 의 profile 드롭다운)
+    if (isProfile) {
+      input = buildProfileSelect(attr.attribute_value);
+      // 드롭다운 옆 상세 링크 — 현재 선택된 Profile 의 속성 팝업 (AI Profile Test 와 동일)
+      profileLink = document.createElement("a");
+      profileLink.href = "#";
+      profileLink.textContent = "상세";
+      profileLink.style.flexShrink = "0";
+      profileLink.style.alignSelf = "center";
+      profileLink.style.whiteSpace = "nowrap";
+      profileLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        const pn = input.value;
+        if (!pn) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+        if (window.ProfileDetail) window.ProfileDetail.open(pn);
+      });
+    } else {
+      input = document.createElement("textarea");
+      input.rows = 1;
+      input.className = "textarea-auto";
+      input.value = attr.attribute_value == null ? "" : String(attr.attribute_value);
+      input.style.flex = "1";
+      input.style.fontFamily = "var(--font-mono)";
+      input.style.fontSize = "var(--fs-sm)";
+    }
+
+    if (isToolParams) belowEl = buildToolParamsProfileRow(input);
 
     const btn = document.createElement("button");
     btn.className = "btn btn-ghost";
@@ -220,7 +276,7 @@
     btn.style.flexShrink = "0";
 
     btn.addEventListener("click", async () => {
-      const newVal = ta.value;
+      const newVal = input.value;
       btn.disabled = true;
       const prev = btn.innerHTML;
       btn.innerHTML = '<span class="spinner"></span>';
@@ -236,9 +292,105 @@
       }
     });
 
-    wrap.appendChild(ta);
+    if (belowEl) {
+      // 입력(textarea) 아래에 profile 드롭다운을 두기 위해 세로 컬럼으로 묶는다
+      const col = document.createElement("div");
+      col.className = "stack-sm";
+      col.style.flex = "1";
+      input.style.width = "100%";
+      input.style.flex = "none";
+      col.appendChild(input);
+      col.appendChild(belowEl);
+      wrap.appendChild(col);
+    } else {
+      wrap.appendChild(input);
+      if (profileLink) wrap.appendChild(profileLink);
+    }
     wrap.appendChild(btn);
     return wrap;
+  }
+
+  // tool_params(JSON) 의 profile_name 을 드롭다운으로 선택 — 변경 시 위 textarea 의 JSON 갱신.
+  function buildToolParamsProfileRow(input) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.style.gap = "6px";
+    row.style.alignItems = "center";
+
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.style.fontSize = "var(--fs-sm)";
+    label.style.flexShrink = "0";
+    label.textContent = "profile name:";
+
+    const sel = document.createElement("select");
+    sel.style.fontFamily = "var(--font-mono)";
+    sel.style.fontSize = "var(--fs-sm)";
+    sel.style.minHeight = "30px";
+
+    // textarea JSON 에서 현재 profile_name 추출 (파싱 실패/비객체는 빈 값)
+    const readProfile = () => {
+      try {
+        const o = JSON.parse(input.value);
+        return (o && typeof o === "object" && !Array.isArray(o)) ? (o.profile_name || "") : "";
+      } catch (e) { return ""; }
+    };
+
+    const fill = (cur) => {
+      sel.innerHTML = "";
+      const ph = document.createElement("option");
+      ph.value = ""; ph.textContent = "(선택)";
+      sel.appendChild(ph);
+      const opts = PROFILE_NAMES.slice();
+      if (cur && !opts.includes(cur)) opts.unshift(cur);  // 목록에 없는 현재 값도 보존
+      opts.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p; o.textContent = p;
+        sel.appendChild(o);
+      });
+      sel.value = cur || "";
+    };
+    fill(readProfile());
+
+    // 드롭다운 변경 → JSON 의 profile_name 갱신 (다른 키는 보존)
+    sel.addEventListener("change", () => {
+      let obj;
+      try { obj = JSON.parse(input.value); } catch (e) { obj = null; }
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) obj = {};
+      if (sel.value) obj.profile_name = sel.value;
+      else delete obj.profile_name;
+      input.value = JSON.stringify(obj);
+      input.dispatchEvent(new Event("input"));  // textarea auto-grow 등 반영
+    });
+
+    // textarea 를 직접 편집해도 드롭다운을 동기화 (위→아래)
+    input.addEventListener("input", () => {
+      const cur = readProfile();
+      if (cur && !Array.from(sel.options).some((o) => o.value === cur)) {
+        const o = document.createElement("option");
+        o.value = cur; o.textContent = cur;
+        sel.appendChild(o);
+      }
+      if (sel.value !== cur) sel.value = cur;
+    });
+
+    // 드롭다운 옆 상세 링크 — 현재 선택된 Profile 의 속성 팝업 (AI Profile Test 와 동일)
+    const detailLink = document.createElement("a");
+    detailLink.href = "#";
+    detailLink.textContent = "상세";
+    detailLink.style.flexShrink = "0";
+    detailLink.style.whiteSpace = "nowrap";
+    detailLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      const pn = sel.value;
+      if (!pn) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+      if (window.ProfileDetail) window.ProfileDetail.open(pn);
+    });
+
+    row.appendChild(label);
+    row.appendChild(sel);
+    row.appendChild(detailLink);
+    return row;
   }
 
   function attrUrlFor(meta, attrName) {

@@ -4,21 +4,24 @@
   let REGIONS = [];  // region 속성 드롭다운 후보 (project/regions.txt)
   let MODELS = {};   // region -> model 후보 (project/models.txt)
 
+  // region/model 후보 로드. force=true 면 항상 재요청, false 면 비어 있을 때만.
+  async function ensureMeta(force) {
+    if (force || !REGIONS.length) {
+      try { REGIONS = await window.API.get("/api/regions"); }
+      catch (e) { if (force) REGIONS = []; }
+    }
+    if (force || !Object.keys(MODELS).length) {
+      try { MODELS = await window.API.get("/api/models"); }
+      catch (e) { if (force) MODELS = {}; }
+    }
+  }
+
   async function render() {
     const main = document.getElementById("main");
     main.innerHTML = "";
 
     // region / model 후보 목록 — 실패해도 화면은 계속 (드롭다운 대신 자유 입력으로 폴백)
-    try {
-      REGIONS = await window.API.get("/api/regions");
-    } catch (e) {
-      REGIONS = [];
-    }
-    try {
-      MODELS = await window.API.get("/api/models");
-    } catch (e) {
-      MODELS = {};
-    }
+    await ensureMeta(true);
 
     const title = document.createElement("div");
     title.className = "view-title";
@@ -125,24 +128,7 @@
               currentProfileName = row.profile_name;
               currentAttrs = attrs;
               attrHost.innerHTML = "";
-              // region <-> model 셀 연동용 컨텍스트 (속성 테이블 1개당 1개)
-              const regionAttr = attrs.find((a) => a.attribute_name === "region");
-              const attrCtx = {
-                regionValue: regionAttr ? String(regionAttr.attribute_value ?? "") : "",
-                modelSelect: null,        // model 드롭다운 element (있으면 region 변경 시 갱신)
-                syncModelOptions: null,   // model 드롭다운 옵션 재계산 함수
-              };
-              attrHost.appendChild(window.SimpleTable.create(
-                [
-                  { key: "attribute_name", label: "Attribute" },
-                  {
-                    key: "attribute_value",
-                    label: "Value",
-                    format: (_v, attr) => buildEditableValueCell(row.profile_name, attr, attrCtx),
-                  },
-                ],
-                attrs
-              ));
+              attrHost.appendChild(buildProfileAttrTable(row.profile_name, attrs));
               genBtn.disabled = false;
             } catch (e) {
               attrHost.innerHTML = '<div class="empty-state muted">조회 실패</div>';
@@ -511,6 +497,73 @@
     return sel;
   }
 
+  // Profile 속성 편집 테이블 — region/model 드롭다운 연동 포함. 메뉴 [2] 패널과 상세 팝업이 공유.
+  function buildProfileAttrTable(profileName, attrs) {
+    // region <-> model 셀 연동용 컨텍스트 (속성 테이블 1개당 1개)
+    const regionAttr = attrs.find((a) => a.attribute_name === "region");
+    const attrCtx = {
+      regionValue: regionAttr ? String(regionAttr.attribute_value ?? "") : "",
+      modelSelect: null,        // model 드롭다운 element (있으면 region 변경 시 갱신)
+      syncModelOptions: null,   // model 드롭다운 옵션 재계산 함수
+    };
+    return window.SimpleTable.create(
+      [
+        { key: "attribute_name", label: "Attribute" },
+        {
+          key: "attribute_value",
+          label: "Value",
+          format: (_v, attr) => buildEditableValueCell(profileName, attr, attrCtx),
+        },
+      ],
+      attrs
+    );
+  }
+
+  // Profile 상세 팝업 — 메뉴 [2] 의 속성 패널을 모달로 그대로 재현 (다른 화면에서 호출용).
+  async function openProfileDetailModal(profileName) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:820px;">
+        <div class="modal-header">
+          <h2>속성 - ${(profileName || "").replace(/</g, "&lt;")}</h2>
+          <div class="row">
+            <button class="btn btn-primary" id="pd-gen-sql" disabled>AI Profile 구문 생성</button>
+            <button class="btn btn-ghost" id="pd-close">✕</button>
+          </div>
+        </div>
+        <div class="modal-body" id="pd-body">
+          <div class="empty-state"><span class="spinner"></span> 조회 중...</div>
+        </div>
+      </div>
+    `;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#pd-close").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+
+    await ensureMeta(false);  // 다른 화면에서 열렸으면 region/model 후보가 비어 있을 수 있음
+    const body = backdrop.querySelector("#pd-body");
+    let attrs = [];
+    try {
+      attrs = await window.API.get(`/api/profiles/${encodeURIComponent(profileName)}/attributes`);
+    } catch (e) {
+      if (backdrop.isConnected) body.innerHTML = `<div class="empty-state muted">${errMsg(e, "속성 조회 실패")}</div>`;
+      return;
+    }
+    if (!backdrop.isConnected) return;
+    body.innerHTML = "";
+    body.appendChild(buildProfileAttrTable(profileName, attrs));
+
+    const genBtn = backdrop.querySelector("#pd-gen-sql");
+    genBtn.disabled = false;
+    genBtn.addEventListener("click", () => {
+      showSqlModal(`CREATE PROFILE — ${profileName}`, buildCreateProfileSql(profileName, attrs));
+    });
+  }
+
   // 속성 Value 셀 — 입력(region/model=드롭다운, 그 외=textarea) + [적용] 버튼.
   // 클릭 시 DBMS_CLOUD_AI.SET_ATTRIBUTE 호출.
   function buildEditableValueCell(profileName, attr, ctx) {
@@ -837,4 +890,6 @@ END;`;
 
   window.Views = window.Views || {};
   window.Views.profileTest = render;
+  // 다른 화면(예: AI Agent Team Test)에서 Profile 상세 팝업을 띄울 때 사용.
+  window.ProfileDetail = { open: openProfileDetailModal };
 })();
