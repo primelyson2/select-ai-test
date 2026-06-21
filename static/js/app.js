@@ -8,7 +8,10 @@
     agents:    { render: () => window.Views.agentTest(),      label: "AI Agent Team Test" },
     chat:      { render: () => window.Views.aiChat(),         label: "AI Chat" },
     databases: { render: () => window.Views.databaseAdmin(),  label: "Database 관리" },
+    access:    { render: () => window.Views.accessAdmin(),    label: "접근 키 관리" },
   };
+  // DB 비의존 라우트 — 접속 가능한 DB 가 없어도 진입 가능(등록/복구/키 관리 경로).
+  const DB_INDEPENDENT = new Set(["databases", "access"]);
   const DEFAULT_ROUTE = "profiles";
 
   function currentRoute() {
@@ -62,9 +65,9 @@
       return;
     }
 
-    // Database 관리 화면은 DB 가 없어도 진입 가능해야 한다(등록/복구 경로).
+    // Database 관리·접근 키 관리 화면은 DB 가 없어도 진입 가능해야 한다(등록/복구/키 관리 경로).
     // 그 외 데이터 화면은 접속 가능한 DB 가 없으면 안내 화면으로 대체.
-    if (route !== "databases" && window.DBSelector && !window.DBSelector.hasAvailable()) {
+    if (!DB_INDEPENDENT.has(route) && window.DBSelector && !window.DBSelector.hasAvailable()) {
       renderNoDatabase(main);
       return;
     }

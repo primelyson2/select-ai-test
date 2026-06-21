@@ -7,6 +7,7 @@
     const dbName = window.DBSelector ? window.DBSelector.current() : "";
     const opts = {
       method,
+      credentials: "same-origin", // 인증 쿠키 동봉
       headers: {
         "Content-Type": "application/json",
         "X-Database": dbName || "",
@@ -22,6 +23,10 @@
       payload = await res.json();
     } else {
       payload = await res.text();
+    }
+    if (res.status === 401) {
+      // 세션 만료 / 미인증 — 로그인 오버레이로 재인증 유도
+      if (window.Auth) window.Auth.showLogin();
     }
     if (!res.ok) {
       const err = new Error(`HTTP ${res.status}`);

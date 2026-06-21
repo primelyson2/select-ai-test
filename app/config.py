@@ -5,7 +5,7 @@ project/ 루트 기준으로 절대경로화하여 oracledb 에 전달한다.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,12 @@ class DatabaseConfig:
 class AppConfig:
     default_database: str
     databases: list[DatabaseConfig]
+    # 접근제어용 사전공유 키 (상위 레벨). 빈 문자열이면 인증 비활성.
+    access_key: str = ""
+    # 키 분실 복구 시 현재 키를 받을 관리자 이메일.
+    admin_email: str = ""
+    # 메일 발송용 SMTP 설정 (host/port/user/password/from/security). 비면 발송 불가.
+    smtp: dict = field(default_factory=dict)
 
     def get(self, name: str) -> DatabaseConfig | None:
         return next((d for d in self.databases if d.name == name), None)
@@ -93,11 +99,15 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         return AppConfig(default_database="", databases=[])
     with p.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    access_key = (raw.get("access_key") or "").strip()
+    admin_email = (raw.get("admin_email") or "").strip()
+    smtp = raw.get("smtp") or {}
+    extra = {"access_key": access_key, "admin_email": admin_email, "smtp": smtp}
     items = raw.get("databases") or []
     dbs = [DatabaseConfig.from_dict(d) for d in items]
     if not dbs:
-        return AppConfig(default_database="", databases=[])
+        return AppConfig(default_database="", databases=[], **extra)
     default = raw.get("default_database") or dbs[0].name
     if not any(d.name == default for d in dbs):
         default = dbs[0].name
-    return AppConfig(default_database=default, databases=dbs)
+    return AppConfig(default_database=default, databases=dbs, **extra)

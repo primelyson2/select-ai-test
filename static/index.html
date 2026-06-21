@@ -18,6 +18,7 @@
       <div class="db-selector">
         <label for="db-select">DB</label>
         <select id="db-select" aria-label="대상 데이터베이스 선택"></select>
+        <button class="btn btn-ghost btn-mini" id="logout-btn" style="display:none;">로그아웃</button>
       </div>
     </header>
 
@@ -38,6 +39,9 @@
       <div class="nav-item" data-route="databases">
         <span>Database 관리</span>
       </div>
+      <div class="nav-item" data-route="access">
+        <span>접근 키 관리</span>
+      </div>
     </nav>
 
     <main class="app-main" id="main"></main>
@@ -45,7 +49,9 @@
 
   <div class="toast-container" id="toast-container"></div>
 
-  <!-- Order matters: deps → components → views → app -->
+  <!-- Order matters: util → auth → deps → components → views → app -->
+  <script src="/static/js/util.js"></script>
+  <script src="/static/js/auth.js"></script>
   <script src="/static/js/api.js"></script>
   <script src="/static/js/db_selector.js"></script>
   <script src="/static/js/components/toast.js"></script>
@@ -57,6 +63,7 @@
   <script src="/static/js/views/agent_test.js"></script>
   <script src="/static/js/views/ai_chat.js"></script>
   <script src="/static/js/views/database_admin.js"></script>
+  <script src="/static/js/views/access_admin.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

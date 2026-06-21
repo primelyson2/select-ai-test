@@ -277,7 +277,7 @@
       hint.textContent = meta.model ? `· 현재 모델: ${meta.model}` : "";
       const candidates = (MODELS && MODELS[meta.region]) || [];
       if (candidates.length === 0) {
-        host.innerHTML = `<div class="muted">region '${meta.region || "?"}' 의 모델 후보가 없습니다 (models.txt 확인)</div>`;
+        host.innerHTML = `<div class="muted">region '${window.escapeHtml(meta.region || "?")}' 의 모델 후보가 없습니다 (models.txt 확인)</div>`;
         return;
       }
       // 후보에 현재 model 이 없으면 맨 앞에 추가해 비교 대상에서 누락되지 않게
@@ -285,7 +285,7 @@
         ? [meta.model, ...candidates] : candidates.slice();
       host.innerHTML = models.map((m) => {
         const checked = m === meta.model ? "checked" : "";
-        return `<label><input type="checkbox" value="${m}" ${checked}/> ${m}</label>`;
+        return `<label><input type="checkbox" value="${window.escapeAttr(m)}" ${checked}/> ${window.escapeHtml(m)}</label>`;
       }).join("");
     }
 
@@ -452,13 +452,13 @@
       }
       return `<div class="row" style="gap:8px; padding:4px 0; align-items:center;">
         <span style="width:18px; text-align:center;">${icon}</span>
-        <span style="font-family:var(--font-mono); ${nameMuted ? "color:var(--text-muted);" : ""}">${m}</span>
+        <span style="font-family:var(--font-mono); ${nameMuted ? "color:var(--text-muted);" : ""}">${window.escapeHtml(m)}</span>
         <span class="muted" style="font-size:var(--fs-sm);">· ${extra}</span>
       </div>`;
     }).join("");
     host.innerHTML = `
       <div class="stack-sm">
-        <div class="muted">Profile <b>${profileName}</b> · 모델 ${Math.min(currentIndex + 1, models.length)}/${models.length} 측정 중</div>
+        <div class="muted">Profile <b>${window.escapeHtml(profileName)}</b> · 모델 ${Math.min(currentIndex + 1, models.length)}/${models.length} 측정 중</div>
         ${rows}
       </div>`;
   }
@@ -523,7 +523,7 @@
     const itemsHtml = runs.map((run) => {
       const ms = run.elapsed_ms != null ? Number(run.elapsed_ms).toLocaleString() : "—";
       const isErr = !!run.error;
-      const body = String(isErr ? run.error : (run.response || "")).replace(/</g, "&lt;");
+      const body = window.escapeHtml(isErr ? run.error : (run.response || ""));
       return `
         <div class="stack-sm" style="margin-bottom: var(--space-4);">
           <div class="row" style="justify-content: space-between; align-items:center;">
@@ -538,7 +538,7 @@
     backdrop.innerHTML = `
       <div class="modal" style="width:760px;">
         <div class="modal-header">
-          <h2>호출별 응답 — ${title.replace(/</g, "&lt;")}</h2>
+          <h2>호출별 응답 — ${window.escapeHtml(title)}</h2>
           <button class="btn btn-ghost" id="mr-close">✕</button>
         </div>
         <div class="modal-body">
@@ -564,7 +564,7 @@
           <button class="btn btn-ghost" id="modal-close">✕</button>
         </div>
         <div class="modal-body">
-          <pre style="white-space:pre-wrap; margin:0; font-family:var(--font);">${(text || "").replace(/</g, "&lt;")}</pre>
+          <pre style="white-space:pre-wrap; margin:0; font-family:var(--font);">${window.escapeHtml(text)}</pre>
         </div>
       </div>
     `;
@@ -687,7 +687,7 @@
     backdrop.innerHTML = `
       <div class="modal" style="width:820px;">
         <div class="modal-header">
-          <h2>속성 - ${(profileName || "").replace(/</g, "&lt;")}</h2>
+          <h2>속성 - ${window.escapeHtml(profileName)}</h2>
           <div class="row">
             <button class="btn btn-primary" id="pd-gen-sql" disabled>AI Profile 구문 생성</button>
             <button class="btn btn-ghost" id="pd-close">✕</button>
@@ -872,11 +872,11 @@ END;`;
           <div class="stack-sm">
             <div class="row" style="justify-content: space-between;">
               <label>프롬프트</label>
-              <div class="row" style="gap:6px;">
+              <div class="row" style="gap:6px; flex-wrap:nowrap;">
                 <input type="text" id="ptm-prompt-title" placeholder="저장할 제목" style="width:130px;">
                 <button class="btn" id="ptm-prompt-add">추가</button>
                 <button class="btn" id="ptm-prompt-update">수정</button>
-                <select id="ptm-prompt-saved" style="min-width:150px;"></select>
+                <select id="ptm-prompt-saved" style="width:150px; flex:0 0 150px;"></select>
               </div>
             </div>
             <textarea id="ptm-prompt" rows="3">Oracle이 어떤 회사인지 설명해줘. 300자 이내로 설명해줘.</textarea>
@@ -890,6 +890,7 @@ END;`;
                 <option value="narrate">narrate</option>
                 <option value="showsql">showsql</option>
                 <option value="explainsql">explainsql</option>
+                <option value="showprompt">showprompt</option>
               </select>
             </div>
             <div style="flex:1"></div>

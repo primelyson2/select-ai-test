@@ -194,7 +194,7 @@
     backdrop.innerHTML = `
       <div class="modal" style="width:820px; max-width:94vw;">
         <div class="modal-header">
-          <h2>Thinking 과정 <span class="muted" style="font-weight:400; font-size:var(--fs-sm);">conv_id: ${(convId || "").replace(/</g, "&lt;")}</span></h2>
+          <h2>Thinking 과정 <span class="muted" style="font-weight:400; font-size:var(--fs-sm);">conv_id: ${window.escapeHtml(convId)}</span></h2>
           <div class="row" style="gap:var(--space-2);">
             <button class="btn btn-ghost" id="thk-copy" type="button" disabled>복사</button>
             <button class="btn btn-ghost" id="thk-close" type="button">✕</button>

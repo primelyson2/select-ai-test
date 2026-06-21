@@ -302,7 +302,7 @@ END;
     backdrop.innerHTML = `
       <div class="modal" style="width:820px;">
         <div class="modal-header">
-          <h2>${title.replace(/</g, "&lt;")}</h2>
+          <h2>${window.escapeHtml(title)}</h2>
           <div class="row">
             <button class="btn btn-ghost" id="at-sql-copy">복사</button>
             <button class="btn btn-ghost" id="at-sql-close">✕</button>
@@ -960,7 +960,7 @@ END;
     backdrop.innerHTML = `
       <div class="modal" style="width:680px;">
         <div class="modal-header">
-          <h2>${meta.kind.toUpperCase()} — ${(meta.name || "").replace(/</g, "&lt;")}</h2>
+          <h2>${window.escapeHtml(meta.kind.toUpperCase())} — ${window.escapeHtml(meta.name)}</h2>
           <button class="btn btn-ghost" id="at-node-close">✕</button>
         </div>
         <div class="modal-body" id="at-node-body">
@@ -999,7 +999,7 @@ END;
     result.className = "stack-sm";
     result.innerHTML = `
       <label>최종 결과 (CLOB)</label>
-      <textarea readonly rows="5" style="font-family:var(--font-mono); font-size:var(--fs-sm);">${(data.result || "").replace(/</g, "&lt;")}</textarea>
+      <textarea readonly rows="5" style="font-family:var(--font-mono); font-size:var(--fs-sm);">${window.escapeHtml(data.result)}</textarea>
     `;
     host.appendChild(result);
 
