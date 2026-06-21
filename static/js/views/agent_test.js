@@ -65,7 +65,10 @@
     const bottomPanel = document.createElement("div");
     bottomPanel.className = "panel";
     bottomPanel.innerHTML = `
-      <div class="panel-header"><h2 id="at-detail-title">노드 선택 시 표시</h2></div>
+      <div class="panel-header">
+        <h2 id="at-detail-title">노드 선택 시 표시</h2>
+        <button class="btn btn-primary" id="at-gen-sql" disabled>Select AI Agent 구문 생성</button>
+      </div>
       <div class="panel-body" id="at-detail">
         <div class="empty-state muted">상단 트리에서 노드를 선택하세요.</div>
       </div>
@@ -125,6 +128,12 @@
         const body = document.getElementById("at-detail");
         title.textContent = `${node.meta.kind.toUpperCase()} — ${node.meta.name}`;
 
+        // Team 노드일 때만 "Select AI Agent 구문 생성" 버튼 활성화
+        const genBtn = document.getElementById("at-gen-sql");
+        const isTeam = node.meta.kind === "team";
+        genBtn.disabled = !isTeam;
+        genBtn.dataset.team = isTeam ? node.meta.name : "";
+
         const cacheKey = `${node.meta.kind}:${node.meta.name}`;
         activeKey = cacheKey;
 
@@ -152,6 +161,25 @@
       },
     });
     document.getElementById("at-tree").appendChild(tree);
+
+    // "Select AI Agent 구문 생성" — 선택된 Team 하위 Agent/Tool/Task + Team 의 CREATE 구문 팝업
+    document.getElementById("at-gen-sql").addEventListener("click", async () => {
+      const btn = document.getElementById("at-gen-sql");
+      const teamName = btn.dataset.team;
+      if (!teamName) return;
+      btn.disabled = true;
+      const prev = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner"></span> 생성 중...';
+      try {
+        const sql = await buildTeamAgentSql(treeData, teamName);
+        showSqlModal(`Select AI Agent 구문 — ${teamName}`, sql);
+      } catch (e) {
+        window.Toast.show(errMsg(e, "구문 생성 실패"), "error");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = prev;
+      }
+    });
   }
 
   // 트리 노드 subtitle 생성
@@ -175,6 +203,127 @@
     if (meta.kind === "task")  return `/api/agents/tasks/${encodeURIComponent(meta.name)}`;
     if (meta.kind === "tool")  return `/api/agents/tools/${encodeURIComponent(meta.name)}`;
     return "/api/agents/teams";
+  }
+
+  // ====================================================================
+  // Select AI Agent 구문 생성 — Team 하위 Agent/Tool/Task + Team CREATE 블록
+  // ====================================================================
+
+  // 상세(detail) 응답을 캐시 우선으로 가져온다 (트리 onSelect 와 동일 캐시 공유)
+  async function fetchDetailCached(meta) {
+    const key = `${meta.kind}:${meta.name}`;
+    let d = detailCache.get(key);
+    if (!d) { d = await window.API.get(pathFor(meta)); detailCache.set(key, d); }
+    return d;
+  }
+
+  // attribute_value 를 타입에 맞게 변환 — JSON 배열/객체, 숫자, 그 외 문자열
+  function coerceAttrValue(raw) {
+    if (raw == null) return "";
+    const s = String(raw).trim();
+    if (s.startsWith("[") || s.startsWith("{")) {
+      try { return JSON.parse(s); } catch (_) { /* fall through */ }
+    }
+    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+    return String(raw);
+  }
+
+  // 속성 행 배열 → attributes JSON 객체
+  function attrsToObject(attributes) {
+    const obj = {};
+    for (const a of attributes || []) {
+      if (!a || !a.attribute_name) continue;
+      obj[a.attribute_name] = coerceAttrValue(a.attribute_value);
+    }
+    return obj;
+  }
+
+  // object_type → DBMS_CLOUD_AI_AGENT DROP/CREATE 프로시저 + 인자명
+  const AGENT_DDL = {
+    AGENT: { drop: "DROP_AGENT", create: "CREATE_AGENT", arg: "agent_name" },
+    TOOL:  { drop: "DROP_TOOL",  create: "CREATE_TOOL",  arg: "tool_name" },
+    TASK:  { drop: "DROP_TASK",  create: "CREATE_TASK",  arg: "task_name" },
+    TEAM:  { drop: "DROP_TEAM",  create: "CREATE_TEAM",  arg: "team_name" },
+  };
+
+  function genAgentBlock(type, name, attributes) {
+    const ddl = AGENT_DDL[type];
+    const json = JSON.stringify(attrsToObject(attributes), null, 2)
+      .replace(/'/g, "''");  // PL/SQL 문자열 안의 single-quote 이스케이프
+    return `BEGIN
+    DBMS_CLOUD_AI_AGENT.${ddl.drop}(${ddl.arg} => '${name}', force => true);
+
+    DBMS_CLOUD_AI_AGENT.${ddl.create}(
+        ${ddl.arg} => '${name}',
+        attributes => '${json}'
+    );
+END;
+/`;
+  }
+
+  // treeData + teamName 으로 Agent → Tool → Task → Team 순 CREATE 구문 문자열 생성
+  async function buildTeamAgentSql(treeData, teamName) {
+    const teamNode = (treeData.teams || []).find((t) => t.name === teamName);
+    if (!teamNode) throw new Error("팀 정보를 찾을 수 없습니다");
+
+    const agentNames = (teamNode.agents || []).map((a) => a.name).filter(Boolean);
+    const taskNames = (teamNode.tasks || []).map((t) => t.name).filter(Boolean);
+    const toolNames = [...new Set((teamNode.tasks || []).flatMap((t) => t.tools || []))].filter(Boolean);
+
+    const [teamD, agentDs, taskDs, toolDs] = await Promise.all([
+      fetchDetailCached({ kind: "team", name: teamName }),
+      Promise.all(agentNames.map((n) => fetchDetailCached({ kind: "agent", name: n }))),
+      Promise.all(taskNames.map((n) => fetchDetailCached({ kind: "task", name: n }))),
+      Promise.all(toolNames.map((n) => fetchDetailCached({ kind: "tool", name: n }))),
+    ]);
+
+    const parts = [];
+    if (agentDs.length) {
+      parts.push("-- agent");
+      agentDs.forEach((d, i) => parts.push(genAgentBlock("AGENT", agentNames[i], d.attributes)));
+    }
+    if (toolDs.length) {
+      parts.push("-- tool");
+      toolDs.forEach((d, i) => parts.push(genAgentBlock("TOOL", toolNames[i], d.attributes)));
+    }
+    if (taskDs.length) {
+      parts.push("-- task");
+      taskDs.forEach((d, i) => parts.push(genAgentBlock("TASK", taskNames[i], d.attributes)));
+    }
+    parts.push("-- Team");
+    parts.push(genAgentBlock("TEAM", teamName, teamD.attributes));
+
+    return parts.join("\n\n");
+  }
+
+  function showSqlModal(title, sql) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:820px;">
+        <div class="modal-header">
+          <h2>${title.replace(/</g, "&lt;")}</h2>
+          <div class="row">
+            <button class="btn btn-ghost" id="at-sql-copy">복사</button>
+            <button class="btn btn-ghost" id="at-sql-close">✕</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <pre id="at-sql-pre" style="white-space:pre; margin:0; font-family:var(--font-mono); font-size:var(--fs-sm); background:var(--surface-alt); padding:var(--space-3); border-radius:var(--radius-md); overflow:auto;"></pre>
+        </div>
+      </div>
+    `;
+    backdrop.querySelector("#at-sql-pre").textContent = sql;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#at-sql-close").addEventListener("click", close);
+    backdrop.querySelector("#at-sql-copy").addEventListener("click", async () => {
+      const ok = await copyToClipboard(sql);
+      window.Toast.show(ok ? "클립보드에 복사됨" : "복사 실패 — 직접 선택해 복사하세요", ok ? "success" : "error");
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
   }
 
   function renderAttributes(detail, meta) {

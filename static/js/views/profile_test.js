@@ -190,8 +190,12 @@
             <input type="number" id="bm-iter" min="1" max="10" value="3" />
           </div>
           <div class="col-prompt stack-sm">
-            <label>Profile 다중 선택 <span class="muted" id="bm-profiles-hint"></span></label>
-            <div class="checklist" id="bm-profiles"></div>
+            <label>AI Profile 선택 <span class="muted" id="bm-profile-hint"></span></label>
+            <select id="bm-profile" style="max-width:320px;"></select>
+          </div>
+          <div class="col-prompt stack-sm">
+            <label>LLM Model 다중 선택 <span class="muted" id="bm-models-hint"></span></label>
+            <div class="checklist" id="bm-models"></div>
           </div>
           <div class="col-prompt row end">
             <button class="btn btn-primary" id="bm-run">▶ 실행</button>
@@ -203,38 +207,91 @@
 
     // object_list 가 필요한 action — 해당 action 선택 시 has_object_list='Y' 만 노출
     const OBJECT_LIST_ACTIONS = new Set(["runsql", "narrate", "showsql"]);
+    // profile_name -> { region, model } 캐시 (속성 재조회 방지)
+    const profileMetaCache = {};
 
-    function renderProfileChecklist() {
+    async function getProfileMeta(name) {
+      if (profileMetaCache[name]) return profileMetaCache[name];
+      const attrs = await window.API.get(`/api/profiles/${encodeURIComponent(name)}/attributes`);
+      const valueOf = (n) => {
+        const a = attrs.find((x) => x.attribute_name === n);
+        return a && a.attribute_value != null ? String(a.attribute_value) : "";
+      };
+      const meta = { region: valueOf("region"), model: valueOf("model") };
+      profileMetaCache[name] = meta;
+      return meta;
+    }
+
+    // 단일 Profile <select> 채우기 — action 에 따라 object_list 필요 Profile 만 노출
+    function renderProfileSelect() {
       const action = document.getElementById("bm-action").value;
-      const host = document.getElementById("bm-profiles");
-      const hint = document.getElementById("bm-profiles-hint");
+      const sel = document.getElementById("bm-profile");
       const requiresObjects = OBJECT_LIST_ACTIONS.has(action);
-      const visible = requiresObjects
-        ? profiles.filter((p) => p.has_object_list === "Y")
-        : profiles;
-      hint.textContent = requiresObjects
-        ? `· ${action} 은(는) object_list 가 설정된 Profile 만 표시`
-        : "";
+      const pool = requiresObjects ? profiles.filter((p) => p.has_object_list === "Y") : profiles;
+      const visible = pool.filter((p) => p.status === "ENABLED");
+      const prev = sel.value;
+      sel.innerHTML = "";
       if (visible.length === 0) {
-        host.innerHTML = `<div class="muted">${action} 에 사용 가능한 Profile (object_list 설정) 이 없습니다</div>`;
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = requiresObjects
+          ? `${action} 에 사용 가능한 Profile (object_list 설정) 이 없습니다`
+          : "사용 가능한 Profile 이 없습니다";
+        sel.appendChild(o);
+        renderModelChecklist();
         return;
       }
-      // 기존 선택 보존 — 살아남은 항목이 없을 때만 첫 3개 default 체크
-      const prevChecked = new Set(
-        Array.from(host.querySelectorAll("input:checked")).map((c) => c.value)
-      );
-      const survivors = visible.filter((p) => prevChecked.has(p.profile_name) && p.status === "ENABLED");
-      const useDefault = survivors.length === 0;
-      host.innerHTML = visible.map((p, i) => {
-        const enabled = p.status === "ENABLED";
-        const checked = useDefault ? (i < 3 && enabled) : prevChecked.has(p.profile_name);
-        return `<label><input type="checkbox" value="${p.profile_name}" ${checked ? "checked" : ""} ${enabled ? "" : "disabled"}/>
-          ${p.profile_name} <span class="muted">${enabled ? "" : "(disabled)"}</span></label>`;
+      visible.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.profile_name;
+        o.textContent = p.profile_name;
+        sel.appendChild(o);
+      });
+      sel.value = visible.some((p) => p.profile_name === prev) ? prev : visible[0].profile_name;
+      renderModelChecklist();
+    }
+
+    // 선택된 Profile 의 region 에 해당하는 model 후보를 체크리스트로 — 현재 model 은 기본 체크
+    async function renderModelChecklist() {
+      const sel = document.getElementById("bm-profile");
+      const host = document.getElementById("bm-models");
+      const hint = document.getElementById("bm-models-hint");
+      const pHint = document.getElementById("bm-profile-hint");
+      const name = sel.value;
+      pHint.textContent = "";
+      hint.textContent = "";
+      if (!name) {
+        host.innerHTML = `<div class="muted">Profile 을 먼저 선택하세요</div>`;
+        return;
+      }
+      host.innerHTML = `<div class="muted"><span class="spinner"></span> 모델 목록 조회 중...</div>`;
+      let meta;
+      try {
+        meta = await getProfileMeta(name);
+      } catch (e) {
+        host.innerHTML = `<div class="muted">${errMsg(e, "속성 조회 실패")}</div>`;
+        return;
+      }
+      if (sel.value !== name) return;  // 조회 도중 선택이 바뀌면 무시
+      pHint.textContent = meta.region ? `· region: ${meta.region}` : "· region 속성 없음";
+      hint.textContent = meta.model ? `· 현재 모델: ${meta.model}` : "";
+      const candidates = (MODELS && MODELS[meta.region]) || [];
+      if (candidates.length === 0) {
+        host.innerHTML = `<div class="muted">region '${meta.region || "?"}' 의 모델 후보가 없습니다 (models.txt 확인)</div>`;
+        return;
+      }
+      // 후보에 현재 model 이 없으면 맨 앞에 추가해 비교 대상에서 누락되지 않게
+      const models = (meta.model && !candidates.includes(meta.model))
+        ? [meta.model, ...candidates] : candidates.slice();
+      host.innerHTML = models.map((m) => {
+        const checked = m === meta.model ? "checked" : "";
+        return `<label><input type="checkbox" value="${m}" ${checked}/> ${m}</label>`;
       }).join("");
     }
 
-    renderProfileChecklist();
-    document.getElementById("bm-action").addEventListener("change", renderProfileChecklist);
+    renderProfileSelect();
+    document.getElementById("bm-action").addEventListener("change", renderProfileSelect);
+    document.getElementById("bm-profile").addEventListener("change", renderModelChecklist);
 
     // --- 프롬프트 저장/불러오기 (localStorage, 세션 간 유지) — 테스트 모달과 동일 라이브러리 공유 ---
     const BM_PROMPTS_KEY = "profileTest.savedPrompts";
@@ -328,23 +385,48 @@
       const prompt = document.getElementById("bm-prompt").value;
       const action = document.getElementById("bm-action").value;
       const iterations = parseInt(document.getElementById("bm-iter").value, 10) || 1;
-      const profile_names = Array.from(document.querySelectorAll("#bm-profiles input:checked")).map((c) => c.value);
-      if (profile_names.length === 0) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+      const profile_name = document.getElementById("bm-profile").value;
+      const models = Array.from(document.querySelectorAll("#bm-models input:checked")).map((c) => c.value);
+      if (!profile_name) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+      if (models.length === 0) { window.Toast.show("LLM Model 을 1개 이상 선택하세요", "warn"); return; }
+
+      // 실행할 때마다 프롬프트 끝에 '.' 을 누적해 동일 입력 캐싱으로 인한 속도 왜곡을 방지.
+      // 카운터는 localStorage 에 저장 → 새로고침/재접속 후에도 계속 증가.
+      const RUN_COUNT_KEY = "profileTest.runCount";
+      const runCount = (parseInt(localStorage.getItem(RUN_COUNT_KEY) || "0", 10) || 0) + 1;
+      localStorage.setItem(RUN_COUNT_KEY, String(runCount));
+      const promptForRun = prompt + ".".repeat(runCount);
 
       const btn = document.getElementById("bm-run");
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> 실행 중...';
       const resultHost = document.getElementById("bm-result");
-      resultHost.innerHTML = '<div class="empty-state"><span class="spinner"></span> 측정 중...</div>';
 
+      // 모델을 1개씩 순차 측정 — 매 회차 어떤 모델을 측정 중인지 진행상황을 갱신
+      const done = [];
       try {
-        const data = await window.API.post("/api/profiles/benchmark", { prompt, action, profile_names, iterations });
-        renderBenchmarkResult(resultHost, data);
-        renderChart(data);
+        for (let i = 0; i < models.length; i++) {
+          renderBenchmarkProgress(resultHost, profile_name, models, done, i);
+          const data = await window.API.post("/api/profiles/benchmark",
+            { prompt: promptForRun, action, profile_name, models: [models[i]], iterations });
+          done.push((data.results && data.results[0]) ||
+            { profile_name, model: models[i], runs: [], avg_ms: null, min_ms: null, max_ms: null });
+        }
+        const combined = { iterations, profile_name, results: done };
+        renderBenchmarkResult(resultHost, combined);
+        renderChart(combined);
       } catch (e) {
         const msg = errMsg(e, "측정 실패");
-        resultHost.innerHTML = `<div class="empty-state muted">${msg}</div>`;
-        window.Toast.show(msg, "error");
+        if (done.length) {
+          // 이미 끝난 모델 결과는 보존하고 오류만 안내
+          const combined = { iterations, profile_name, results: done };
+          renderBenchmarkResult(resultHost, combined);
+          renderChart(combined);
+          window.Toast.show(`${msg} (${done.length}/${models.length} 모델만 완료)`, "error");
+        } else {
+          resultHost.innerHTML = `<div class="empty-state muted">${msg}</div>`;
+          window.Toast.show(msg, "error");
+        }
       } finally {
         btn.disabled = false;
         btn.innerHTML = "▶ 실행";
@@ -352,12 +434,53 @@
     });
   }
 
+  // 모델별 순차 측정 진행상황 — 완료(✓)/측정중(스피너)/대기(·) 상태를 목록으로 표시
+  function renderBenchmarkProgress(host, profileName, models, done, currentIndex) {
+    const rows = models.map((m, i) => {
+      let icon, nameMuted = false, extra;
+      if (i < currentIndex) {
+        const r = done[i];
+        icon = "✓";
+        extra = r && r.avg_ms != null
+          ? `평균 ${Number(r.avg_ms).toLocaleString()} ms`
+          : "오류";
+      } else if (i === currentIndex) {
+        icon = '<span class="spinner"></span>';
+        extra = "측정 중...";
+      } else {
+        icon = "·"; nameMuted = true; extra = "대기";
+      }
+      return `<div class="row" style="gap:8px; padding:4px 0; align-items:center;">
+        <span style="width:18px; text-align:center;">${icon}</span>
+        <span style="font-family:var(--font-mono); ${nameMuted ? "color:var(--text-muted);" : ""}">${m}</span>
+        <span class="muted" style="font-size:var(--fs-sm);">· ${extra}</span>
+      </div>`;
+    }).join("");
+    host.innerHTML = `
+      <div class="stack-sm">
+        <div class="muted">Profile <b>${profileName}</b> · 모델 ${Math.min(currentIndex + 1, models.length)}/${models.length} 측정 중</div>
+        ${rows}
+      </div>`;
+  }
+
   function renderBenchmarkResult(host, data) {
     host.innerHTML = "";
     const iters = data.iterations || (data.results[0]?.runs.length ?? 1);
     const fmtNum = (v) => (v == null || v === "") ? v : Number(v).toLocaleString();
     const columns = [
-      { key: "profile_name", label: "Profile", headerAlign: "center" },
+      { key: (r) => r.model || r.profile_name, label: "Model",
+        format: (v, row) => {
+          const span = document.createElement("span");
+          span.textContent = v;
+          span.style.cursor = "pointer";
+          span.style.textDecoration = "underline dotted";
+          span.title = "클릭하면 호출별 응답 보기";
+          span.addEventListener("click", (e) => {
+            e.stopPropagation();
+            showModelRunsModal(row);
+          });
+          return span;
+        }},
     ];
     for (let i = 1; i <= iters; i++) {
       columns.push({
@@ -393,6 +516,44 @@
     host.appendChild(window.SimpleTable.create(columns, data.results, { className: "table-grid" }));
   }
 
+  // 모델 셀 클릭 → 그 모델의 회차별 응답을 한 모달에 모아서 표시
+  function showModelRunsModal(row) {
+    const title = String(row.model || row.profile_name || "");
+    const runs = row.runs || [];
+    const itemsHtml = runs.map((run) => {
+      const ms = run.elapsed_ms != null ? Number(run.elapsed_ms).toLocaleString() : "—";
+      const isErr = !!run.error;
+      const body = String(isErr ? run.error : (run.response || "")).replace(/</g, "&lt;");
+      return `
+        <div class="stack-sm" style="margin-bottom: var(--space-4);">
+          <div class="row" style="justify-content: space-between; align-items:center;">
+            <label>#${run.iteration}${isErr ? ' <span class="error">오류</span>' : ''}</label>
+            <span class="muted" style="font-size:var(--fs-sm);">${ms} ms</span>
+          </div>
+          <pre class="${isErr ? "error" : ""}" style="white-space:pre-wrap; margin:0; font-family:var(--font); background:var(--surface-alt); padding:var(--space-3); border-radius:var(--radius-md);">${body}</pre>
+        </div>`;
+    }).join("");
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:760px;">
+        <div class="modal-header">
+          <h2>호출별 응답 — ${title.replace(/</g, "&lt;")}</h2>
+          <button class="btn btn-ghost" id="mr-close">✕</button>
+        </div>
+        <div class="modal-body">
+          ${runs.length ? itemsHtml : '<div class="empty-state muted">응답이 없습니다.</div>'}
+        </div>
+      </div>
+    `;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#mr-close").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+  }
+
   function showResponseModal(text) {
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
@@ -419,7 +580,7 @@
     chartInstance = new Chart(ctx, {
       type: "bar",
       data: {
-        labels: data.results.map((r) => r.profile_name),
+        labels: data.results.map((r) => r.model || r.profile_name),
         datasets: [{
           label: "평균 응답시간 (ms)",
           data: data.results.map((r) => r.avg_ms || 0),

@@ -128,59 +128,115 @@ async def set_profile_attribute(
     return {"ok": True, "profile_name": name, "attribute_name": attribute_name}
 
 
+_GENERATE_SQL = (
+    "SELECT DBMS_CLOUD_AI.GENERATE(prompt => :p, profile_name => :pn, action => :a) AS r "
+    "FROM dual"
+)
+_SET_MODEL_SQL = (
+    "BEGIN DBMS_CLOUD_AI.SET_ATTRIBUTE("
+    "profile_name => :pn, attribute_name => 'model', attribute_value => :av); END;"
+)
+
+
+async def _run_iterations(database: str, prompt: str, profile_name: str,
+                          action: str, iterations: int) -> list[dict]:
+    """한 Profile 에 대해 iterations 회 GENERATE 를 호출하고 회차별 측정값을 반환."""
+    runs: list[dict] = []
+    for i in range(1, iterations + 1):
+        # 회차 번호만큼 '.' 을 prompt 끝에 추가 — LLM/캐시 동일 입력 제거용
+        prompt_i = prompt + ("." * i)
+        t0 = time.perf_counter()
+        try:
+            row = await db.fetch_one(database, _GENERATE_SQL, p=prompt_i, pn=profile_name, a=action)
+            t1 = time.perf_counter()
+            runs.append({
+                "iteration": i,
+                "elapsed_ms": int((t1 - t0) * 1000),
+                "response": (row or {}).get("r") or "",
+                "error": None,
+            })
+        except Exception as exc:
+            t1 = time.perf_counter()
+            msg = str(exc).strip().splitlines()[0] if str(exc).strip() else "execution failed"
+            logger.warning("benchmark cell failed: db=%s profile=%s iter=%d: %s",
+                           database, profile_name, i, msg)
+            runs.append({
+                "iteration": i,
+                "elapsed_ms": int((t1 - t0) * 1000),
+                "response": "",
+                "error": msg,
+            })
+    return runs
+
+
+def _summarize(runs: list[dict], **extra) -> dict:
+    ok = [r["elapsed_ms"] for r in runs if r["error"] is None]
+    return {
+        **extra,
+        "runs": runs,
+        "avg_ms": int(sum(ok) / len(ok)) if ok else None,
+        "min_ms": min(ok) if ok else None,
+        "max_ms": max(ok) if ok else None,
+    }
+
+
 @router.post("/profiles/benchmark")
 async def benchmark(payload: dict, database: str = Depends(current_db)) -> dict:
     prompt = (payload.get("prompt") or "").strip()
     action = (payload.get("action") or "chat").strip()
-    profile_names = payload.get("profile_names") or []
-    iterations = int(payload.get("iterations") or 1)
+    iterations = max(1, min(int(payload.get("iterations") or 1), 10))
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "prompt required"})
+
+    profile_name = (payload.get("profile_name") or "").strip()
+    models = [m for m in (payload.get("models") or []) if m]
+
+    # 모델 비교 모드 — 단일 Profile 의 model 속성을 선택한 모델로 바꿔가며 측정
+    if profile_name and models:
+        # 측정 종료 후 복원할 원래 model 백업
+        orig_rows = await db.fetch_all(
+            database,
+            "SELECT attribute_value FROM USER_CLOUD_AI_PROFILE_ATTRIBUTES "
+            "WHERE profile_name = :n AND attribute_name = 'model'",
+            n=profile_name,
+        )
+        orig_model = orig_rows[0].get("attribute_value") if orig_rows else None
+
+        results: list[dict] = []
+        try:
+            for model in models:
+                try:
+                    await db.execute(database, _SET_MODEL_SQL, pn=profile_name, av=model)
+                except Exception as exc:
+                    # model 변경 자체가 실패하면 해당 모델의 모든 회차를 오류로 기록하고 계속
+                    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else "set model failed"
+                    logger.warning("benchmark set model failed: db=%s profile=%s model=%s: %s",
+                                   database, profile_name, model, msg)
+                    runs = [{"iteration": i, "elapsed_ms": 0, "response": "", "error": msg}
+                            for i in range(1, iterations + 1)]
+                    results.append(_summarize(runs, profile_name=profile_name, model=model))
+                    continue
+                runs = await _run_iterations(database, prompt, profile_name, action, iterations)
+                results.append(_summarize(runs, profile_name=profile_name, model=model))
+        finally:
+            # 원래 model 로 복원 (실패해도 측정 결과는 반환)
+            if orig_model is not None:
+                try:
+                    await db.execute(database, _SET_MODEL_SQL, pn=profile_name, av=orig_model)
+                except Exception as exc:
+                    logger.error("benchmark restore model failed: db=%s profile=%s model=%s: %s",
+                                 database, profile_name, orig_model, exc)
+        return {"iterations": iterations, "profile_name": profile_name,
+                "restored_model": orig_model, "results": results}
+
+    # 기존 모드 — 여러 Profile 을 그대로 비교 (개별 Profile 테스트 모달이 사용)
+    profile_names = payload.get("profile_names") or []
     if not profile_names:
-        raise HTTPException(status_code=400, detail={"error": "profile_names required"})
-    iterations = max(1, min(iterations, 10))
-
-    sql = (
-        "SELECT DBMS_CLOUD_AI.GENERATE(prompt => :p, profile_name => :pn, action => :a) AS r "
-        "FROM dual"
-    )
-
-    results: list[dict] = []
+        raise HTTPException(status_code=400, detail={"error": "profile_name+models or profile_names required"})
+    results = []
     for pn in profile_names:
-        runs: list[dict] = []
-        for i in range(1, iterations + 1):
-            # 회차 번호만큼 '.' 을 prompt 끝에 추가 — LLM/캐시 동일 입력 제거용
-            prompt_i = prompt + ("." * i)
-            t0 = time.perf_counter()
-            try:
-                row = await db.fetch_one(database, sql, p=prompt_i, pn=pn, a=action)
-                t1 = time.perf_counter()
-                resp = (row or {}).get("r") or ""
-                runs.append({
-                    "iteration": i,
-                    "elapsed_ms": int((t1 - t0) * 1000),
-                    "response": resp,
-                    "error": None,
-                })
-            except Exception as exc:
-                t1 = time.perf_counter()
-                msg = str(exc).strip().splitlines()[0] if str(exc).strip() else "execution failed"
-                logger.warning("benchmark cell failed: db=%s profile=%s iter=%d: %s",
-                               database, pn, i, msg)
-                runs.append({
-                    "iteration": i,
-                    "elapsed_ms": int((t1 - t0) * 1000),
-                    "response": "",
-                    "error": msg,
-                })
-        ok = [r["elapsed_ms"] for r in runs if r["error"] is None]
-        results.append({
-            "profile_name": pn,
-            "runs": runs,
-            "avg_ms": int(sum(ok) / len(ok)) if ok else None,
-            "min_ms": min(ok) if ok else None,
-            "max_ms": max(ok) if ok else None,
-        })
+        runs = await _run_iterations(database, prompt, pn, action, iterations)
+        results.append(_summarize(runs, profile_name=pn))
     return {"iterations": iterations, "results": results}
 
 
