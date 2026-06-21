@@ -9,6 +9,7 @@
 (function () {
   const KEY = "oai.db";
   const selectEl = document.getElementById("db-select");
+  let lastDbs = []; // 직전 populate 결과 (접속 가능 여부 판정용)
 
   function getStored() {
     return localStorage.getItem(KEY) || "";
@@ -30,6 +31,7 @@
       dbs = [];
     }
 
+    lastDbs = dbs;
     const prev = selectEl.value || getStored();
     selectEl.innerHTML = "";
     for (const db of dbs) {
@@ -61,9 +63,13 @@
     window.DBSelector = {
       current: () => selectEl.value || getStored(),
       reload: populate,
+      ready: false,
+      // 접속 가능한(상태 ok) DB 가 하나라도 있는지. 등록 0개 / 전부 unavailable → false
+      hasAvailable: () => lastDbs.some((d) => d.status !== "unavailable"),
     };
 
     await populate();
+    window.DBSelector.ready = true;
 
     selectEl.addEventListener("change", () => {
       setStored(selectEl.value);
