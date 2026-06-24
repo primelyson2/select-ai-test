@@ -161,6 +161,8 @@
             format: makeCommentEditor(owner, tableName, dirty) },
           { key: "annotations", label: "Annotation",
             format: makeAnnotationCell(owner, tableName, data.annotations_supported) },
+          { key: "_ai", label: "AI 추천", headerAlign: "center", align: "center",
+            format: makeAiSuggestCell(owner, tableName, () => profileSel.value) },
         ],
         data.columns,
         { emptyText: "컬럼이 없습니다" }
@@ -302,6 +304,122 @@
       wrap.appendChild(btn);
       return wrap;
     };
+  }
+
+  // ───── 셀: AI 추천 버튼 ─────
+  //  클릭 → 모달에서 컬럼 데이터 100행 기반 코멘트 추천(SELECT AI chat) → [적용] 시 Comment 칸에 반영.
+  function makeAiSuggestCell(owner, tableName, getProfile) {
+    return (value, row) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-mini";
+      btn.textContent = "AI 추천";
+      btn.title = `${row.name} 컬럼 데이터 기반 코멘트 추천`;
+      btn.addEventListener("click", () => {
+        openAiSuggestModal({
+          owner, tableName,
+          column: row.name,
+          dataType: row.data_type,
+          profileName: getProfile(),
+          onApply: (text) => {
+            // 같은 행의 Comment textarea 에 반영 + dirty 표시(input 이벤트로 처리)
+            const ta = document.querySelector(
+              `#om-detail-body textarea[data-field="comment"][data-column="${CSS.escape(row.name)}"]`
+            );
+            if (!ta) { window.Toast.show("Comment 칸을 찾지 못했습니다", "error"); return; }
+            ta.value = text;
+            ta.dispatchEvent(new Event("input", { bubbles: true }));
+            window.Toast.show(`${row.name} 코멘트에 적용됨 (저장 필요)`, "success");
+          },
+        });
+      });
+      return btn;
+    };
+  }
+
+  // ───── AI 코멘트 추천 모달 ─────
+  function openAiSuggestModal({ owner, tableName, column, dataType, profileName, onApply }) {
+    const target = `${owner}.${tableName}.${column}`;
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:640px;">
+        <div class="modal-header">
+          <h2>AI 코멘트 추천 — ${escapeHtml(target)}</h2>
+          <button class="btn btn-ghost" id="ai-close">✕</button>
+        </div>
+        <div class="modal-body stack">
+          <div class="muted" style="font-size:var(--fs-sm);">
+            Profile <b>${escapeHtml(profileName || "(미선택)")}</b> · 컬럼 데이터 100행을 조회해 SELECT AI(chat) 로 추천합니다.
+          </div>
+          <div id="ai-status" class="empty-state"><span class="spinner"></span> 추천 생성 중...</div>
+          <div class="stack-sm" id="ai-result" style="display:none;">
+            <label>추천 코멘트 <span class="muted" style="font-size:var(--fs-sm);">— 적용 전 수정 가능</span></label>
+            <textarea id="ai-text" rows="3" class="textarea-auto"></textarea>
+          </div>
+          <div class="row end" style="gap:8px;">
+            <button class="btn btn-ghost" id="ai-retry" style="display:none;">다시 추천</button>
+            <button class="btn btn-primary" id="ai-apply" disabled>적용</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#ai-close").addEventListener("click", close);
+
+    const statusEl = backdrop.querySelector("#ai-status");
+    const resultEl = backdrop.querySelector("#ai-result");
+    const textEl = backdrop.querySelector("#ai-text");
+    const applyBtn = backdrop.querySelector("#ai-apply");
+    const retryBtn = backdrop.querySelector("#ai-retry");
+
+    async function fetchSuggestion() {
+      if (!profileName) {
+        statusEl.style.display = "";
+        statusEl.className = "empty-state muted";
+        statusEl.textContent = "Profile 이 선택되지 않았습니다.";
+        return;
+      }
+      statusEl.style.display = "";
+      statusEl.className = "empty-state";
+      statusEl.innerHTML = '<span class="spinner"></span> 추천 생성 중...';
+      resultEl.style.display = "none";
+      applyBtn.disabled = true;
+      retryBtn.style.display = "none";
+      try {
+        const res = await window.API.post(
+          `/api/objects/${encodeURIComponent(owner)}/${encodeURIComponent(tableName)}/columns/${encodeURIComponent(column)}/suggest-comment`,
+          { profile_name: profileName }
+        );
+        statusEl.style.display = "none";
+        resultEl.style.display = "";
+        textEl.value = res.suggestion || "";
+        resultEl.querySelector("label").innerHTML =
+          `추천 코멘트 <span class="muted" style="font-size:var(--fs-sm);">— 샘플 ${res.sample_count}건 기반, 적용 전 수정 가능</span>`;
+        applyBtn.disabled = !(res.suggestion || "").trim();
+        retryBtn.style.display = "";
+      } catch (err) {
+        statusEl.style.display = "";
+        statusEl.className = "empty-state muted";
+        statusEl.textContent = errMsg(err, "추천 생성 실패");
+        retryBtn.style.display = "";
+      }
+    }
+
+    applyBtn.addEventListener("click", () => {
+      const text = textEl.value.trim();
+      if (!text) { window.Toast.show("추천 내용이 비어 있습니다", "warn"); return; }
+      onApply && onApply(text);
+      close();
+    });
+    retryBtn.addEventListener("click", fetchSuggestion);
+
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+    fetchSuggestion();
   }
 
   // ───── Annotation 칩 렌더링 (display only) ─────

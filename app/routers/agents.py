@@ -330,6 +330,86 @@ async def set_tool_attribute(name: str, attribute_name: str, payload: dict,
 
 
 # ====================================================================
+# AI 추천 — agent role / task·tool instruction 을 SELECT AI(chat) 로 개선 제안
+#   Thinking 과정(실행 트레이스) + 현재 저장값을 컨텍스트로 삼는다.
+# ====================================================================
+
+_GENERATE_CHAT_SQL = (
+    "SELECT DBMS_CLOUD_AI.GENERATE(prompt => :p, profile_name => :pn, action => 'chat') AS r "
+    "FROM dual"
+)
+# kind → (표시 라벨, 대상 attribute_name)
+_SUGGEST_KIND = {
+    "agent": ("Agent", "role"),
+    "task": ("Task", "instruction"),
+    "tool": ("Tool", "instruction"),
+}
+_SUGGEST_THINKING_MAXLEN = 8000
+
+
+async def _pick_profile(database: str, prefer: str | None) -> str | None:
+    """추천 호출에 쓸 Profile — 지정값 우선, 없으면 ENABLED(없으면 아무거나) 첫 Profile."""
+    if prefer:
+        return prefer
+    rows = await db.fetch_all(
+        database,
+        "SELECT profile_name FROM USER_CLOUD_AI_PROFILES "
+        "WHERE status = 'ENABLED' ORDER BY profile_name",
+    )
+    if not rows:
+        rows = await db.fetch_all(
+            database, "SELECT profile_name FROM USER_CLOUD_AI_PROFILES ORDER BY profile_name")
+    return rows[0]["profile_name"] if rows else None
+
+
+@router.post("/suggest-attribute")
+async def suggest_attribute(payload: dict, database: str = Depends(current_db)) -> dict:
+    kind = (payload.get("kind") or "").strip().lower()
+    name = (payload.get("name") or "").strip()
+    if kind not in _SUGGEST_KIND:
+        raise HTTPException(status_code=400, detail={"error": "kind must be agent/task/tool"})
+    if not name:
+        raise HTTPException(status_code=400, detail={"error": "name required"})
+    label, attribute = _SUGGEST_KIND[kind]
+    current = (payload.get("current") or "").strip()
+    thinking = (payload.get("thinking") or "").strip()
+    if len(thinking) > _SUGGEST_THINKING_MAXLEN:
+        thinking = thinking[:_SUGGEST_THINKING_MAXLEN] + "\n…(생략)"
+
+    profile_name = await _pick_profile(
+        database, (payload.get("profile_name") or "").strip() or None)
+    if not profile_name:
+        raise HTTPException(status_code=400, detail={"error": "사용 가능한 AI Profile 이 없습니다"})
+
+    attr_ko = "역할(role)" if attribute == "role" else "지시문(instruction)"
+    thinking_block = f"\n\n[에이전트 팀 실행 과정(Thinking)]\n{thinking}" if thinking else ""
+    prompt = (
+        "당신은 Oracle AI Agent Team 설정을 개선하는 전문가입니다.\n"
+        f"아래는 {label} '{name}' 의 현재 {attr_ko} 입니다.\n"
+        f"이 {label} 가 더 정확하고 명확하게 동작하도록 {attr_ko} 를 한국어로 개선해 제안해 주세요.\n"
+        "실행 과정(Thinking)이 제공되면 그 맥락을 반영하되, 간결하고 구체적인 지시문으로 작성하세요.\n"
+        "제안 텍스트만 출력하고, 따옴표나 'AI:' 같은 접두어·부가 설명은 붙이지 마세요.\n\n"
+        f"[현재 {attr_ko}]\n{current or '(비어 있음)'}"
+        f"{thinking_block}"
+    )
+
+    try:
+        row = await db.fetch_one(database, _GENERATE_CHAT_SQL, p=prompt, pn=profile_name)
+    except Exception as exc:
+        msg = _first_line(exc)
+        logger.warning("suggest-attribute GENERATE failed: db=%s kind=%s name=%s: %s",
+                       database, kind, name, msg)
+        raise HTTPException(status_code=400, detail={"error": msg})
+
+    suggestion = ((row or {}).get("r") or "").strip()
+    # LLM 이 종종 양끝에 따옴표를 붙임 — 제거
+    if len(suggestion) >= 2 and suggestion[0] in "\"'" and suggestion[-1] == suggestion[0]:
+        suggestion = suggestion[1:-1].strip()
+    return {"kind": kind, "name": name, "attribute": attribute,
+            "profile_name": profile_name, "suggestion": suggestion}
+
+
+# ====================================================================
 # 실행
 # ====================================================================
 

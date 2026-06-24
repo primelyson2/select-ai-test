@@ -42,6 +42,7 @@
     const tabs = window.Tabs.create([
       { id: "list", label: "1. Profile 목록 / 속성", render: (host) => renderTab1(host, profiles) },
       { id: "bench", label: "2. 속도 측정 및 비교", render: (host) => renderTab2(host, profiles) },
+      { id: "feedback", label: "3. Feedback 관리", render: (host) => renderTab3(host, profiles) },
     ]);
     main.appendChild(tabs);
   }
@@ -433,6 +434,389 @@
       }
     });
   }
+
+  // ====================================================================
+  // --- Tab 3: Feedback 관리 (서버 연동) ---
+  //   - GET  /api/profiles/{name}/feedback/vectab : <PROFILE>_FEEDBACK_VECINDEX$VECTAB (display only)
+  //   - GET  /api/profiles/feedback/mapped-sql    : v$mapped_sql (NL2SQL 실행 내역 + sql_id)
+  //   - POST /api/profiles/{name}/feedback        : DBMS_CLOUD_AI.FEEDBACK 실행
+  // ====================================================================
+
+  // 현재 선택된 Profile 명 — 셀 안의 버튼들이 클릭 시점에 읽는다.
+  function fbProfile() {
+    const sel = document.getElementById("fb-profile");
+    return sel ? sel.value : "";
+  }
+
+  // <PROFILE_NAME>_FEEDBACK_VECINDEX$VECTAB — feedback 사용 시 자동 생성되는 Vector Table 명
+  function vectorTableName(profile) {
+    return profile ? `${profile}_FEEDBACK_VECINDEX$VECTAB` : "<PROFILE_NAME>_FEEDBACK_VECINDEX$VECTAB";
+  }
+
+  // PL/SQL 문자열 리터럴용 single-quote 이스케이프
+  function fbSqlLit(s) {
+    return String(s == null ? "" : s).replace(/'/g, "''");
+  }
+
+  // sql_id 기반 — 기존 실행된 SQL 에 피드백 추가(=update). 미리보기/복사용 스크립트.
+  function buildFeedbackAddByIdSql(profile, sqlId, feedbackType) {
+    return `BEGIN
+    DBMS_CLOUD_AI.FEEDBACK(
+        profile_name  => '${fbSqlLit(profile)}',
+        sql_id        => '${fbSqlLit(sqlId)}',
+        feedback_type => '${fbSqlLit(feedbackType)}',
+        operation     => 'add'  -- add(update) / delete
+    );
+END;
+/`;
+  }
+
+  // sql_id 기반 — 저장된 피드백 삭제(operation=delete). 미리보기/복사용 스크립트.
+  function buildFeedbackDeleteByIdSql(profile, sqlId, feedbackType) {
+    return `BEGIN
+    DBMS_CLOUD_AI.FEEDBACK(
+        profile_name  => '${fbSqlLit(profile)}',
+        sql_id        => '${fbSqlLit(sqlId)}',
+        feedback_type => '${fbSqlLit(feedbackType)}',
+        operation     => 'delete'
+    );
+END;
+/`;
+  }
+
+  // sql_text 기반 — 저장된 피드백 삭제(operation=delete). sql_id 가 없는 행 삭제에 사용. 미리보기/복사용 스크립트.
+  function buildFeedbackDeleteByTextSql(profile, sqlText, feedbackType, response) {
+    return `BEGIN
+    DBMS_CLOUD_AI.FEEDBACK(
+        profile_name  => '${fbSqlLit(profile)}',
+        sql_text      => '${fbSqlLit(sqlText)}',
+        feedback_type => '${fbSqlLit(feedbackType)}',
+        response      => '${fbSqlLit(response)}',
+        operation     => 'delete'
+    );
+END;
+/`;
+  }
+
+  // sql_text 기반 — 사전 실행 없이 프롬프트 + 기대 응답(SQL)으로 피드백 등록. 미리보기/복사용 스크립트.
+  function buildFeedbackByTextSql(profile, sqlText, feedbackType, response) {
+    return `BEGIN
+    DBMS_CLOUD_AI.FEEDBACK(
+        profile_name  => '${fbSqlLit(profile)}',
+        sql_text      => '${fbSqlLit(sqlText)}',
+        feedback_type => '${fbSqlLit(feedbackType)}',
+        response      => '${fbSqlLit(response)}'
+    );
+END;
+/`;
+  }
+
+  // FEEDBACK 스크립트 확인 팝업 — 스크립트를 보여주고 [반영] 클릭 시 onApply() 실행.
+  // onApply 가 throw 하면 모달을 유지해 사용자가 오류를 보고 재시도할 수 있게 한다.
+  function showFeedbackConfirmModal(title, sql, onApply) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:760px;">
+        <div class="modal-header">
+          <h2>${window.escapeHtml(title)}</h2>
+          <button class="btn btn-ghost" id="fbm-close">✕</button>
+        </div>
+        <div class="modal-body stack">
+          <label class="muted" style="font-size:var(--fs-sm);">아래 스크립트를 실행합니다.</label>
+          <pre id="fbm-pre" style="white-space:pre; margin:0; font-family:var(--font-mono); font-size:var(--fs-sm); background:var(--surface-alt); padding:var(--space-3); border-radius:var(--radius-md); overflow:auto;"></pre>
+          <div class="row end" style="gap:8px;">
+            <button class="btn btn-ghost" id="fbm-copy">복사</button>
+            <button class="btn btn-primary" id="fbm-apply">반영</button>
+          </div>
+        </div>
+      </div>
+    `;
+    backdrop.querySelector("#fbm-pre").textContent = sql;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#fbm-close").addEventListener("click", close);
+    backdrop.querySelector("#fbm-copy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(sql); window.Toast.show("클립보드에 복사됨", "success"); }
+      catch (_) { window.Toast.show("복사 실패", "error"); }
+    });
+    const applyBtn = backdrop.querySelector("#fbm-apply");
+    applyBtn.addEventListener("click", async () => {
+      applyBtn.disabled = true;
+      const prev = applyBtn.innerHTML;
+      applyBtn.innerHTML = '<span class="spinner"></span> 반영 중...';
+      try {
+        await onApply();
+        close();
+      } catch (e) {
+        // onApply 내부에서 토스트 처리 — 모달은 유지하고 버튼만 복구
+        applyBtn.disabled = false;
+        applyBtn.innerHTML = prev;
+      }
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+  }
+
+  function renderTab3(host, profiles) {
+    host.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "split-vert";
+    host.appendChild(wrap);
+
+    // 사용 가능한 Profile (ENABLED 우선, 없으면 전체)
+    const enabled = profiles.filter((p) => p.status === "ENABLED");
+    const pool = enabled.length ? enabled : profiles;
+    const profileOptions = pool.map((p) =>
+      `<option value="${window.escapeAttr(p.profile_name)}">${window.escapeHtml(p.profile_name)}</option>`).join("");
+
+    // ---- 상단: Profile 선택 + Vector Table ----
+    const topPanel = document.createElement("div");
+    topPanel.className = "panel";
+    topPanel.innerHTML = `
+      <div class="panel-header"><h2>피드백 대상 Profile</h2></div>
+      <div class="panel-body stack-sm">
+        <div class="row" style="gap:12px; align-items:center;">
+          <label style="width:90px;">Profile</label>
+          <select id="fb-profile" style="min-width:260px;">${profileOptions}</select>
+        </div>
+        <div class="row" style="gap:12px; align-items:center;">
+          <label style="width:90px;">Vector Table</label>
+          <input id="fb-vectab" readonly style="min-width:380px; font-family:var(--font-mono); font-size:var(--fs-sm);">
+        </div>
+        <div class="muted" style="font-size:var(--fs-sm);">
+          · 같은 <b>sql_id</b> 에 대한 피드백은 <b>1건만 유지</b>됩니다 (<code>operation =&gt; 'add'</code> 가 곧 update).
+        </div>
+      </div>
+    `;
+    wrap.appendChild(topPanel);
+
+    // ---- Vector Table 내용 (저장된 Feedback, display only) ----
+    const vectabPanel = document.createElement("div");
+    vectabPanel.className = "panel";
+    vectabPanel.innerHTML = `
+      <div class="panel-header">
+        <h2>Vector Table 내용 <span class="muted" style="font-size:var(--fs-sm);">저장된 Feedback (display only)</span></h2>
+        <button class="btn btn-ghost" id="fb-vectab-reload">↻ 조회</button>
+      </div>
+      <div class="panel-body" id="fb-vectab-list"></div>
+    `;
+    wrap.appendChild(vectabPanel);
+
+    // ---- Feedback 추가 ① 실행된 내역에서 (v$mapped_sql) ----
+    const histPanel = document.createElement("div");
+    histPanel.className = "panel";
+    histPanel.innerHTML = `
+      <div class="panel-header">
+        <h2>Feedback 추가 — 실행된 내역에서 <span class="muted" style="font-size:var(--fs-sm);">v$mapped_sql</span></h2>
+        <button class="btn btn-ghost" id="fb-hist-reload">↻ 내역 조회</button>
+      </div>
+      <div class="panel-body" id="fb-hist"></div>
+    `;
+    wrap.appendChild(histPanel);
+
+    // ---- Feedback 추가 ② 실행내역 없이 (sql_text + response) ----
+    const directPanel = document.createElement("div");
+    directPanel.className = "panel";
+    directPanel.innerHTML = `
+      <div class="panel-header">
+        <h2>Feedback 추가 — 실행내역 없이 <span class="muted" style="font-size:var(--fs-sm);">sql_text + response</span></h2>
+        <button class="btn btn-primary" id="fb-gen-direct">추가</button>
+      </div>
+      <div class="panel-body stack-sm">
+        <div class="stack-sm">
+          <label>SQL Text <span class="muted" style="font-size:var(--fs-sm);">— 자연어 프롬프트 또는 SELECT AI 구문</span></label>
+          <textarea id="fb-sql-text" rows="2">select ai showsql how many movies</textarea>
+        </div>
+        <div class="row" style="gap:12px; align-items:center;">
+          <label style="width:90px;">Feedback</label>
+          <input type="hidden" id="fb-direct-type" value="negative">
+          <span>negative</span>
+          <span class="muted" style="font-size:var(--fs-sm);">— 고정</span>
+        </div>
+        <div class="stack-sm">
+          <label>Response <span class="muted" style="font-size:var(--fs-sm);">— 기대하는(교정된) SQL. negative 일 때 권장</span></label>
+          <textarea id="fb-response" rows="3" style="font-family:var(--font-mono); font-size:var(--fs-sm);">SELECT SUM(1) FROM "ADB_USER"."MOVIES"</textarea>
+        </div>
+      </div>
+    `;
+    wrap.appendChild(directPanel);
+
+    const vectabInput = document.getElementById("fb-vectab");
+
+    // --- Vector Table 내용 조회 (display only) ---
+    async function loadVectab() {
+      const profile = fbProfile();
+      const listHost = document.getElementById("fb-vectab-list");
+      if (!profile) {
+        listHost.innerHTML = '<div class="empty-state muted">Profile 을 선택하세요.</div>';
+        return;
+      }
+      listHost.innerHTML = '<div class="empty-state"><span class="spinner"></span> 조회 중...</div>';
+      let data;
+      try {
+        data = await window.API.get(`/api/profiles/${encodeURIComponent(profile)}/feedback/vectab`);
+      } catch (e) {
+        listHost.innerHTML = `<div class="empty-state muted">${errMsg(e, "Vector Table 조회 실패")}</div>`;
+        return;
+      }
+      if (fbProfile() !== profile) return;  // 그 사이 Profile 변경 시 무시
+      if (!data.exists) {
+        listHost.innerHTML = '<div class="empty-state muted">vector table 없음</div>';
+        return;
+      }
+      const cols = (data.columns || []).map((c) => ({ key: c, label: c }));
+      listHost.innerHTML = "";
+      if (!cols.length) {
+        listHost.innerHTML = '<div class="empty-state muted">컬럼 정보가 없습니다.</div>';
+        return;
+      }
+      // 행 끝에 삭제 버튼 컬럼 추가 — sql_id 가 있는 행에만 노출.
+      cols.push({ key: "_del", label: "", headerAlign: "center",
+        format: (_v, row) => buildVectabDeleteBtn(row, loadVectab) });
+      listHost.appendChild(window.SimpleTable.create(cols, data.rows || [], { className: "keep-case" }));
+      if (!(data.rows || []).length) {
+        listHost.appendChild(divFromHtml('<div class="empty-state muted">저장된 Feedback 이 없습니다.</div>'));
+      }
+    }
+
+    // --- v$mapped_sql 실행 내역 조회 ---
+    async function loadMappedSql() {
+      const histHost = document.getElementById("fb-hist");
+      histHost.innerHTML = '<div class="empty-state"><span class="spinner"></span> 조회 중...</div>';
+      let rows;
+      try {
+        rows = await window.API.get("/api/profiles/feedback/mapped-sql");
+      } catch (e) {
+        histHost.innerHTML = `<div class="empty-state muted">${errMsg(e, "v$mapped_sql 조회 실패")}</div>`;
+        return;
+      }
+      histHost.innerHTML = "";
+      histHost.appendChild(window.SimpleTable.create(
+        [
+          { key: "sql_fulltext", label: "Sql_fulltext" },
+          { key: "sql_id", label: "sql_id" },
+          { key: "mapped_sql_text", label: "Mapped_sql_text" },
+          { key: "translation_timestamp", label: "timestamp", headerAlign: "center" },
+          { key: "_add", label: "", headerAlign: "center",
+            format: (_v, row) => buildMappedAddBtn(row, loadVectab) },
+        ],
+        rows || [],
+        { className: "keep-case" }
+      ));
+      if (!(rows || []).length) {
+        histHost.appendChild(divFromHtml('<div class="empty-state muted">실행 내역이 없습니다 (v$mapped_sql 비어 있음).</div>'));
+      }
+    }
+
+    // v$mapped_sql 행의 "추가" 버튼 — 스크립트 팝업을 띄우고 [반영] 클릭 시 실제 FEEDBACK 실행.
+    function buildMappedAddBtn(row, onDone) {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-primary";
+      btn.textContent = "추가";
+      btn.title = "feedback_type=positive, operation=add (같은 sql_id 는 1건만 유지되어 update 됨)";
+      btn.addEventListener("click", () => {
+        const profile = fbProfile();
+        if (!profile) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+        if (!row.sql_id) { window.Toast.show("sql_id 가 없습니다", "warn"); return; }
+        const sql = buildFeedbackAddByIdSql(profile, row.sql_id, "positive");
+        showFeedbackConfirmModal(`FEEDBACK (add) — ${row.sql_id}`, sql, async () => {
+          try {
+            await window.API.post(`/api/profiles/${encodeURIComponent(profile)}/feedback`,
+              { sql_id: row.sql_id, feedback_type: "positive", operation: "add" });
+            window.Toast.show(`피드백 추가됨 (${row.sql_id})`, "success");
+            if (typeof onDone === "function") onDone();
+          } catch (e) {
+            window.Toast.show(errMsg(e, "피드백 추가 실패"), "error");
+            throw e;  // 모달 유지 (사용자가 오류 확인 후 재시도)
+          }
+        });
+      });
+      return btn;
+    }
+
+    // vectab 행의 "삭제" 버튼 — 스크립트 팝업을 띄우고 [반영] 클릭 시 FEEDBACK(operation=delete) 실행.
+    //   - sql_id 가 있으면 sql_id 기반 삭제
+    //   - sql_id 가 없으면 sql_text + feedback_type + response 기반 삭제
+    function buildVectabDeleteBtn(row, onDone) {
+      const sqlId = (row.sql_id || "").trim();
+      const sqlText = (row.sql_text || "").trim();
+      if (!sqlId && !sqlText) return divFromHtml('<span class="muted">—</span>');
+
+      const btn = document.createElement("button");
+      btn.className = "btn btn-primary";
+      btn.textContent = "삭제";
+      btn.title = "operation=delete (이 행의 저장된 피드백을 삭제)";
+      btn.addEventListener("click", () => {
+        const profile = fbProfile();
+        if (!profile) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+
+        let sql, payload, label;
+        if (sqlId) {
+          sql = buildFeedbackDeleteByIdSql(profile, sqlId, row.feedback_type || "positive");
+          payload = { sql_id: sqlId, operation: "delete" };
+          label = sqlId;
+        } else {
+          const ft = row.feedback_type || "negative";
+          sql = buildFeedbackDeleteByTextSql(profile, sqlText, ft, row.response || "");
+          payload = { sql_text: sqlText, feedback_type: ft, response: row.response || "", operation: "delete" };
+          label = sqlText;
+        }
+
+        showFeedbackConfirmModal(`FEEDBACK (delete) — ${label}`, sql, async () => {
+          try {
+            await window.API.post(`/api/profiles/${encodeURIComponent(profile)}/feedback`, payload);
+            window.Toast.show("피드백 삭제됨", "success");
+            if (typeof onDone === "function") onDone();
+          } catch (e) {
+            window.Toast.show(errMsg(e, "피드백 삭제 실패"), "error");
+            throw e;  // 모달 유지 (사용자가 오류 확인 후 재시도)
+          }
+        });
+      });
+      return btn;
+    }
+
+    // Profile 변경 → Vector Table 명 갱신 + 내용 재조회
+    document.getElementById("fb-profile").addEventListener("change", () => {
+      vectabInput.value = vectorTableName(fbProfile());
+      loadVectab();
+    });
+
+    document.getElementById("fb-vectab-reload").addEventListener("click", loadVectab);
+    document.getElementById("fb-hist-reload").addEventListener("click", loadMappedSql);
+
+    // 직접 입력 → 스크립트 팝업을 띄우고 [반영] 클릭 시 FEEDBACK(sql_text) 실제 실행
+    document.getElementById("fb-gen-direct").addEventListener("click", () => {
+      const profile = fbProfile();
+      if (!profile) { window.Toast.show("Profile 을 선택하세요", "warn"); return; }
+      const sqlText = document.getElementById("fb-sql-text").value.trim();
+      if (!sqlText) { window.Toast.show("SQL Text 를 입력하세요", "warn"); return; }
+      const type = document.getElementById("fb-direct-type").value;
+      const response = document.getElementById("fb-response").value;
+      const sql = buildFeedbackByTextSql(profile, sqlText, type, response);
+      showFeedbackConfirmModal(`FEEDBACK (sql_text) — ${profile}`, sql, async () => {
+        try {
+          await window.API.post(`/api/profiles/${encodeURIComponent(profile)}/feedback`,
+            { sql_text: sqlText, feedback_type: type, response });
+          window.Toast.show("피드백 등록됨", "success");
+          loadVectab();
+        } catch (e) {
+          window.Toast.show(errMsg(e, "피드백 등록 실패"), "error");
+          throw e;  // 모달 유지 (사용자가 오류 확인 후 재시도)
+        }
+      });
+    });
+
+    // 진입 시 초기화 — Vector Table 명/내용 + 실행 내역 조회
+    vectabInput.value = vectorTableName(fbProfile());
+    loadVectab();
+    loadMappedSql();
+  }
+
+  // 간단 HTML → element (Tab3 보조)
+  function divFromHtml(html) { const d = document.createElement("div"); d.innerHTML = html; return d.firstElementChild || d; }
 
   // 모델별 순차 측정 진행상황 — 완료(✓)/측정중(스피너)/대기(·) 상태를 목록으로 표시
   function renderBenchmarkProgress(host, profileName, models, done, currentIndex) {

@@ -15,13 +15,12 @@
     main.innerHTML = "";
     detailCache.clear();
 
-    // profile_name 드롭다운용 Profile 목록 — 실패해도 화면은 계속 (자유 입력 폴백)
-    try {
-      const profiles = await window.API.get("/api/profiles");
-      PROFILE_NAMES = (profiles || []).map((p) => p.profile_name).filter(Boolean);
-    } catch (e) {
-      PROFILE_NAMES = [];
-    }
+    // 트리(/tree)와 Profile 목록(/profiles)은 서로 무관하므로 병렬로 요청한다.
+    // - /tree : 화면 본문(트리) — 지연의 본체. 먼저 await 해 화면을 막지 않게 한다.
+    // - /profiles : 상세 패널의 profile_name 드롭다운용. 실패해도 화면은 계속(자유 입력 폴백).
+    //   둘을 직렬로 await 하면 트리가 profiles 왕복까지 기다리므로 동시에 출발시킨다.
+    const treeP = window.API.get("/api/agents/tree");
+    const profilesP = window.API.get("/api/profiles");
 
     const title = document.createElement("div");
     title.className = "view-title";
@@ -32,10 +31,19 @@
     // /tree 한 번으로 트리 데이터 + 팀 목록을 모두 확보 (별도 /teams 왕복 제거).
     let treeData = { teams: [], tools_meta: {} };
     try {
-      treeData = await window.API.get("/api/agents/tree");
+      treeData = await treeP;
     } catch (e) {
+      // 트리 실패 시에도 떠 있는 profiles 요청의 unhandled rejection 을 방지
+      profilesP.catch(() => {});
       main.appendChild(divFromHTML('<div class="empty-state muted">Team 트리 로드 실패</div>'));
       return;
+    }
+
+    try {
+      const profiles = await profilesP;
+      PROFILE_NAMES = (profiles || []).map((p) => p.profile_name).filter(Boolean);
+    } catch (e) {
+      PROFILE_NAMES = [];
     }
     const teams = (treeData.teams || []).map((t) => ({ name: t.name, status: t.status }));
 
@@ -675,6 +683,7 @@ END;
         <h2>Thinking 과정</h2>
         <div class="row" style="gap:var(--space-3);">
           <span id="at-think-count" class="muted"></span>
+          <button class="btn btn-ghost" id="at-think-suggest">AI 추천</button>
           <button class="btn btn-ghost" id="at-think-copy" disabled>복사</button>
         </div>
       </div>
@@ -685,6 +694,11 @@ END;
     wrap.appendChild(thinkPanel);
 
     document.getElementById("at-think-copy").addEventListener("click", copyThinking);
+    document.getElementById("at-think-suggest").addEventListener("click", () => {
+      const teamName = document.getElementById("at-team").value;
+      const thinkingText = lastThinkingRows.length ? buildThinkingText(lastThinkingRows) : "";
+      openAgentSuggestModal(teamName, thinkingText);
+    });
 
     const midPanel = document.createElement("div");
     midPanel.className = "panel";
@@ -872,6 +886,217 @@ END;
       ok ? `Thinking ${lastThinkingRows.length}단계 복사됨` : "복사 실패 — 직접 선택해 복사하세요",
       ok ? "success" : "error"
     );
+  }
+
+  // ====================================================================
+  // AI 추천 모달 — 선택 팀의 Agent role / Task·Tool instruction 을 조회해
+  //   [추천] 시 개선안을 옆 컬럼에 표시(수정 가능), [적용] 시 SET_ATTRIBUTE 로 반영.
+  // ====================================================================
+  async function openAgentSuggestModal(teamName, thinkingText) {
+    if (!teamName) { window.Toast.show("Team 을 선택하세요", "warn"); return; }
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:1100px;">
+        <div class="modal-header">
+          <h2>AI 추천 — ${window.escapeHtml(teamName)}</h2>
+          <button class="btn btn-ghost" id="ags-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="row" style="gap:12px; align-items:center; margin-bottom:var(--space-3);">
+            <label style="width:90px;">AI Profile</label>
+            <select id="ags-profile" style="min-width:240px;"><option>로딩 중…</option></select>
+            <span class="muted" style="font-size:var(--fs-sm);">— SELECT AI(chat) 호출에 사용</span>
+          </div>
+          <div class="muted" style="font-size:var(--fs-sm); margin-bottom:var(--space-3);">
+            저장된 Agent role / Task·Tool instruction 을 조회했습니다. [추천] 으로 개선안을 받아 수정 후 [적용] 하면 반영됩니다.${thinkingText ? "" : " <b>(아직 실행 전이라 Thinking 컨텍스트 없이 추천합니다)</b>"}
+          </div>
+          <div id="ags-list"><div class="empty-state"><span class="spinner"></span> 조회 중...</div></div>
+        </div>
+      </div>`;
+
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#ags-close").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+
+    const listHost = backdrop.querySelector("#ags-list");
+    const profileSel = backdrop.querySelector("#ags-profile");
+    let tree, profiles;
+    try {
+      [tree, profiles] = await Promise.all([
+        window.API.get("/api/agents/tree"),
+        window.API.get("/api/profiles").catch(() => []),
+      ]);
+    } catch (e) {
+      listHost.innerHTML = `<div class="empty-state muted">${errMsg(e, "트리 조회 실패")}</div>`;
+      return;
+    }
+
+    // AI Profile 드롭다운 — ENABLED 우선, 없으면 전체. chat 호출에 사용.
+    const enabled = (profiles || []).filter((p) => p.status === "ENABLED");
+    const pool = enabled.length ? enabled : (profiles || []);
+    profileSel.innerHTML = pool.length
+      ? pool.map((p) => `<option value="${window.escapeAttr(p.profile_name)}">${window.escapeHtml(p.profile_name)}</option>`).join("")
+      : '<option value="">(사용 가능한 Profile 없음)</option>';
+
+    const team = (tree.teams || []).find((t) => t.name === teamName);
+    if (!team) { listHost.innerHTML = '<div class="empty-state muted">팀을 찾을 수 없습니다</div>'; return; }
+
+    // 팀의 첫 Agent 가 쓰는 profile 이 목록에 있으면 기본 선택값으로
+    const defProfile = (team.agents || []).map((a) => a.profile_name).find(Boolean);
+    if (defProfile && pool.some((p) => p.profile_name === defProfile)) profileSel.value = defProfile;
+
+    const getProfile = () => profileSel.value;
+    const toolsMeta = tree.tools_meta || {};
+    const taskByName = {};
+    (team.tasks || []).forEach((t) => { taskByName[t.name] = t; });
+
+    const stack = document.createElement("div");
+    stack.className = "stack";
+    (team.agents || []).forEach((agent) => {
+      stack.appendChild(buildSuggestItem({
+        kind: "agent", name: agent.name, current: agent.role || "", getProfile, thinkingText, depth: 0,
+      }));
+      (agent.tasks || []).forEach((taskName) => {
+        const task = taskByName[taskName];
+        if (!task) return;
+        stack.appendChild(buildSuggestItem({
+          kind: "task", name: task.name, current: task.instruction || "", getProfile, thinkingText, depth: 1,
+        }));
+        (task.tools || []).forEach((toolName) => {
+          const tm = toolsMeta[toolName] || {};
+          stack.appendChild(buildSuggestItem({
+            kind: "tool", name: toolName, current: tm.instruction || "", getProfile, thinkingText, depth: 2,
+          }));
+        });
+      });
+    });
+
+    listHost.innerHTML = "";
+    if (!stack.children.length) {
+      listHost.innerHTML = '<div class="empty-state muted">표시할 Agent/Task/Tool 이 없습니다</div>';
+      return;
+    }
+    listHost.appendChild(stack);
+  }
+
+  // 적용(반영) 엔드포인트 — agent.role / task.instruction / tool.instruction
+  function suggestApplyUrl(kind, name) {
+    const n = encodeURIComponent(name);
+    if (kind === "agent") return `/api/agents/${n}/attributes/role`;
+    if (kind === "task")  return `/api/agents/tasks/${n}/attributes/instruction`;
+    return `/api/agents/tools/${n}/attributes/instruction`;  // tool
+  }
+
+  // 추천 모달의 항목 1개(현재값 | 추천(수정가능) + 추천/적용 버튼)
+  function buildSuggestItem({ kind, name, current, getProfile, thinkingText, depth }) {
+    const attrLabel = kind === "agent" ? "role" : "instruction";
+    const item = document.createElement("div");
+    item.className = "panel";
+    item.style.marginLeft = (depth * 24) + "px";
+    item.style.padding = "var(--space-3)";
+
+    const head = document.createElement("div");
+    head.className = "row";
+    head.style.justifyContent = "space-between";
+    head.style.alignItems = "center";
+    const left = document.createElement("div");
+    left.appendChild(thinkBadge(kind, name));
+    const actions = document.createElement("div");
+    actions.className = "row";
+    actions.style.gap = "6px";
+    const recoBtn = document.createElement("button");
+    recoBtn.type = "button";
+    recoBtn.className = "btn btn-mini";
+    recoBtn.textContent = "추천";
+    const applyBtn = document.createElement("button");
+    applyBtn.type = "button";
+    applyBtn.className = "btn btn-primary btn-mini";
+    applyBtn.textContent = "적용";
+    applyBtn.disabled = true;
+    actions.appendChild(recoBtn);
+    actions.appendChild(applyBtn);
+    head.appendChild(left);
+    head.appendChild(actions);
+
+    const cols = document.createElement("div");
+    cols.className = "row";
+    cols.style.gap = "12px";
+    cols.style.alignItems = "stretch";
+    cols.style.marginTop = "var(--space-2)";
+
+    const curCol = document.createElement("div");
+    curCol.style.flex = "1";
+    curCol.innerHTML = `<label class="muted" style="font-size:var(--fs-sm);">현재 ${attrLabel}</label>`;
+    const curText = document.createElement("div");
+    curText.style.whiteSpace = "pre-wrap";
+    curText.style.fontSize = "var(--fs-sm)";
+    curText.style.background = "var(--surface-alt)";
+    curText.style.padding = "var(--space-2)";
+    curText.style.borderRadius = "var(--radius-md)";
+    curText.style.maxHeight = "180px";
+    curText.style.overflow = "auto";
+    curText.textContent = current || "(비어 있음)";
+    curCol.appendChild(curText);
+
+    const recoCol = document.createElement("div");
+    recoCol.style.flex = "1";
+    recoCol.innerHTML = `<label class="muted" style="font-size:var(--fs-sm);">추천 ${attrLabel} (수정 가능)</label>`;
+    const recoTa = document.createElement("textarea");
+    recoTa.rows = 7;
+    recoTa.placeholder = "[추천] 클릭 시 표시됩니다";
+    recoTa.style.fontSize = "var(--fs-sm)";
+    recoCol.appendChild(recoTa);
+
+    cols.appendChild(curCol);
+    cols.appendChild(recoCol);
+    item.appendChild(head);
+    item.appendChild(cols);
+
+    recoBtn.addEventListener("click", async () => {
+      recoBtn.disabled = true;
+      const prev = recoBtn.textContent;
+      recoBtn.innerHTML = '<span class="spinner"></span>';
+      const profile = getProfile();
+      if (!profile) { window.Toast.show("AI Profile 을 선택하세요", "warn"); recoBtn.disabled = false; recoBtn.textContent = prev; return; }
+      try {
+        const res = await window.API.post("/api/agents/suggest-attribute", {
+          kind, name, current, thinking: thinkingText, profile_name: profile,
+        });
+        recoTa.value = res.suggestion || "";
+        applyBtn.disabled = !(res.suggestion || "").trim();
+      } catch (e) {
+        window.Toast.show(errMsg(e, "추천 실패"), "error");
+      } finally {
+        recoBtn.disabled = false;
+        recoBtn.textContent = prev;
+      }
+    });
+
+    applyBtn.addEventListener("click", async () => {
+      const val = recoTa.value.trim();
+      if (!val) { window.Toast.show("추천 내용이 비어 있습니다", "warn"); return; }
+      applyBtn.disabled = true;
+      const prev = applyBtn.textContent;
+      applyBtn.innerHTML = '<span class="spinner"></span>';
+      try {
+        await window.API.put(suggestApplyUrl(kind, name), { value: val });
+        curText.textContent = val;   // 반영 결과를 '현재' 칸에도 표시
+        current = val;
+        window.Toast.show(`${name} ${attrLabel} 적용됨`, "success");
+        applyBtn.textContent = "적용됨";
+      } catch (e) {
+        window.Toast.show(errMsg(e, "적용 실패"), "error");
+        applyBtn.disabled = false;
+        applyBtn.textContent = prev;
+      }
+    });
+
+    return item;
   }
 
   // navigator.clipboard 우선, 비보안 컨텍스트(예: http://<ip>:8000)에서는 textarea 폴백.

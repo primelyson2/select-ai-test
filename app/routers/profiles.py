@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import array
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -281,3 +283,209 @@ async def profile_objects(name: str, database: str = Depends(current_db)) -> lis
         }
         for r in joined
     ]
+
+
+# ====================================================================
+# 메뉴 [2] Tab 3 — SELECT AI Feedback 관리
+#   - GET  /profiles/{name}/feedback/vectab  : <PROFILE>_FEEDBACK_VECINDEX$VECTAB 조회 (display only)
+#   - GET  /profiles/feedback/mapped-sql     : v$mapped_sql (NL2SQL 실행 내역 + sql_id)
+#   - POST /profiles/{name}/feedback         : DBMS_CLOUD_AI.FEEDBACK 실행 (sql_id / sql_text 모드)
+# ====================================================================
+
+_VECTAB_SUFFIX = "_FEEDBACK_VECINDEX$VECTAB"
+# Oracle 식별자 화이트리스트 — vectab 명에는 '$' 가 포함되므로 허용.
+_IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
+_FEEDBACK_TYPES = {"positive", "negative"}
+_FEEDBACK_OPS = {"add", "delete"}
+
+
+def _first_line(exc: Exception) -> str:
+    s = str(exc).strip()
+    return s.splitlines()[0] if s else "execution failed"
+
+
+def _normalize_cell(v):
+    """vectab 값 표시용 정규화 — VECTOR(array)/datetime/dict 등을 JSON 직렬화 가능한 형태로."""
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    # 23ai VECTOR 는 thin mode 에서 array.array 로 들어온다 — 앞 8개 차원만 미리보기.
+    if isinstance(v, array.array):
+        v = list(v)
+    if isinstance(v, (list, tuple)):
+        head = ", ".join(str(x) for x in v[:8])
+        more = f", … ({len(v)} dims)" if len(v) > 8 else ""
+        return f"[{head}{more}]"
+    if isinstance(v, dict):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(v)
+    return str(v)
+
+
+# attributes(JSON) 를 펼쳐 보여줄 키 순서. feedback vector table 의 attributes 컬럼은
+# {"response","feedback_type","sql_id","sql_text","feedback_content"} 형태의 JSON.
+_ATTR_KEYS = ["response", "feedback_type", "sql_id", "sql_text", "feedback_content"]
+# 표시에서 제외할 컬럼(고차원 VECTOR — 화면에 의미 없음).
+_HIDE_COLS = {"embedding"}
+
+
+@router.get("/profiles/{name}/feedback/vectab")
+async def feedback_vectab(name: str, database: str = Depends(current_db)) -> dict:
+    """선택한 Profile 의 Feedback Vector Table 내용을 조회 (display only).
+
+    규칙: 테이블명 = '<PROFILE_NAME>_FEEDBACK_VECINDEX$VECTAB'.
+    테이블이 없으면 exists=False 만 돌려주고 row 는 조회하지 않는다.
+    """
+    table_name = f"{name}{_VECTAB_SUFFIX}"
+    # 존재 확인 — 실제 저장된 table_name(대소문자) 을 받아 후속 조회에 사용
+    found = await db.fetch_all(
+        database,
+        "SELECT table_name FROM user_tables WHERE UPPER(table_name) = UPPER(:t)",
+        t=table_name,
+    )
+    if not found:
+        return {"table_name": table_name, "exists": False, "columns": [], "rows": []}
+
+    actual = found[0]["table_name"]
+    if not _IDENT_RE.match(actual):
+        # 화이트리스트 위반(정상 경로에선 발생하지 않음) — 보간 금지
+        return {"table_name": actual, "exists": True, "columns": [], "rows": []}
+
+    # 표시 컬럼 구성: embedding(VECTOR) 은 제외하고, attributes(JSON) 는 JSON_TABLE 로
+    # 키별 컬럼으로 펼친다. 식별자는 user_tab_columns 메타 + 화이트리스트 검증 후 직접 보간
+    # (thin DDL/bind 제약 회피와 동일 원칙).
+    cols_meta = await db.fetch_all(
+        database,
+        "SELECT column_name FROM user_tab_columns "
+        "WHERE table_name = :t ORDER BY column_id",
+        t=actual,
+    )
+
+    select_parts: list[str] = []   # SQL SELECT 식
+    display_cols: list[str] = []   # 화면 컬럼 순서(소문자 키)
+    has_attr = False
+    for c in cols_meta:
+        col = c["column_name"]
+        low = col.lower()
+        if low in _HIDE_COLS:
+            continue
+        if low == "attributes":
+            has_attr = True
+            display_cols.extend(_ATTR_KEYS)  # attributes 자리에 펼친 키를 배치
+            continue
+        if not _IDENT_RE.match(col):
+            continue
+        select_parts.append(f't."{col}"')
+        display_cols.append(low)
+
+    from_clause = f'"{actual}" t'
+    if has_attr:
+        # JSON_TABLE 로 attributes JSON 을 스칼라 컬럼으로 추출. 컬럼 별칭은 _ATTR_KEYS 와 동일.
+        jt_cols = ",\n            ".join(
+            f"{k} VARCHAR2(4000) PATH '$.{k}'" for k in _ATTR_KEYS
+        )
+        select_parts.extend(f"jt.{k}" for k in _ATTR_KEYS)
+        from_clause += (
+            f", JSON_TABLE(t.\"ATTRIBUTES\", '$'\n"
+            f"          COLUMNS (\n            {jt_cols}\n          )) jt"
+        )
+
+    if not select_parts:
+        return {"table_name": actual, "exists": True, "columns": display_cols, "rows": []}
+
+    # 행 수가 많을 수 있어 상위 500행으로 제한.
+    sql = (
+        f"SELECT {', '.join(select_parts)}\n"
+        f"FROM {from_clause}\n"
+        f"FETCH FIRST 500 ROWS ONLY"
+    )
+    data = await db.fetch_all(database, sql)
+    rows = [{k: _normalize_cell(v) for k, v in r.items()} for r in data]
+    return {"table_name": actual, "exists": True, "columns": display_cols, "rows": rows}
+
+
+@router.get("/profiles/feedback/mapped-sql")
+async def feedback_mapped_sql(database: str = Depends(current_db)) -> list[dict]:
+    """v$mapped_sql — SELECT AI NL2SQL 실행 내역(sql_id 확인용).
+
+    조회 권한(GRANT READ ON SYS.V_$MAPPED_SQL)이 없으면 ORA 오류가 그대로 전파된다.
+    """
+    # SELECT AI NL2SQL 만 — DBMS_CLOUD_AI.GENERATE 또는 'select ai' 가 포함된 행만 노출
+    # (내부 dbms_sql.parse 커서 등은 제외).
+    # 성능: 필터는 SQL_TEXT(VARCHAR2(1000)) 로 — 키워드는 문장 앞에 오므로 1000자 내 포함됨.
+    #       CLOB(SQL_FULLTEXT) 에 UPPER+LIKE 를 걸면 전 행의 CLOB 을 materialize 해 느림.
+    #       표시용 sql_fulltext(CLOB) 는 매칭된 소수 행에만 fetch 된다.
+    return await db.fetch_all(
+        database,
+        "SELECT sql_id, sql_fulltext, mapped_sql_text, "
+        "       CAST(translation_timestamp AS TIMESTAMP) AS translation_timestamp "
+        "  FROM v$mapped_sql "
+        " WHERE UPPER(sql_text) LIKE '%DBMS_CLOUD_AI.GENERATE%' "
+        "    OR UPPER(sql_text) LIKE '%SELECT AI %' "
+        " ORDER BY translation_timestamp DESC",
+    )
+
+
+@router.post("/profiles/{name}/feedback")
+async def add_feedback(name: str, payload: dict, database: str = Depends(current_db)) -> dict:
+    """DBMS_CLOUD_AI.FEEDBACK 실행.
+
+    - sql_id 모드 : {sql_id, feedback_type, operation('add'|'delete')}
+    - sql_text 모드: {sql_text, feedback_type, response}
+    """
+    feedback_type = (payload.get("feedback_type") or "").strip().lower()
+    sql_id = (payload.get("sql_id") or "").strip()
+    sql_text = (payload.get("sql_text") or "").strip()
+
+    if sql_id:
+        operation = (payload.get("operation") or "add").strip().lower()
+        if operation not in _FEEDBACK_OPS:
+            raise HTTPException(status_code=400, detail={"error": "operation must be add/delete"})
+        # delete 는 feedback_type 불필요, add 는 필수
+        if operation == "add" and feedback_type not in _FEEDBACK_TYPES:
+            raise HTTPException(status_code=400, detail={"error": "feedback_type must be positive/negative"})
+        try:
+            if operation == "delete":
+                await db.execute(
+                    database,
+                    "BEGIN DBMS_CLOUD_AI.FEEDBACK(profile_name => :pn, sql_id => :sid, "
+                    "operation => 'delete'); END;",
+                    pn=name, sid=sql_id,
+                )
+            else:
+                await db.execute(
+                    database,
+                    "BEGIN DBMS_CLOUD_AI.FEEDBACK(profile_name => :pn, sql_id => :sid, "
+                    "feedback_type => :ft, operation => 'add'); END;",
+                    pn=name, sid=sql_id, ft=feedback_type,
+                )
+        except Exception as exc:
+            msg = _first_line(exc)
+            logger.warning("FEEDBACK(sql_id) failed: db=%s profile=%s sql_id=%s op=%s: %s",
+                           database, name, sql_id, operation, msg)
+            raise HTTPException(status_code=400, detail={"error": msg})
+        return {"ok": True, "profile_name": name, "sql_id": sql_id, "operation": operation}
+
+    if sql_text:
+        if feedback_type not in _FEEDBACK_TYPES:
+            raise HTTPException(status_code=400, detail={"error": "feedback_type must be positive/negative"})
+        operation = (payload.get("operation") or "add").strip().lower()
+        if operation not in _FEEDBACK_OPS:
+            raise HTTPException(status_code=400, detail={"error": "operation must be add/delete"})
+        response = payload.get("response") or ""
+        try:
+            await db.execute(
+                database,
+                "BEGIN DBMS_CLOUD_AI.FEEDBACK(profile_name => :pn, sql_text => :st, "
+                "feedback_type => :ft, response => :resp, operation => :op); END;",
+                pn=name, st=sql_text, ft=feedback_type, resp=response, op=operation,
+            )
+        except Exception as exc:
+            msg = _first_line(exc)
+            logger.warning("FEEDBACK(sql_text) failed: db=%s profile=%s op=%s: %s",
+                           database, name, operation, msg)
+            raise HTTPException(status_code=400, detail={"error": msg})
+        return {"ok": True, "profile_name": name, "mode": "sql_text", "operation": operation}
+
+    raise HTTPException(status_code=400, detail={"error": "sql_id or sql_text required"})
