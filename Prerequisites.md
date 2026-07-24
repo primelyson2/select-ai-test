@@ -79,6 +79,8 @@ GRANT CREATE ANY CONTEXT TO askoracle;
 GRANT DROP ANY CONTEXT TO askoracle;
 GRANT EXECUTE ON DBMS_RLS TO askoracle;
 GRANT SELECT ON v$mapped_sql TO askoracle;
+-- 생성된 application context 조회
+GRANT SELECT ON sys.dba_context TO askoracle;
 ```
 
 ## 클라우드 인증(Principal Auth) 활성화
@@ -304,7 +306,7 @@ END;
 ### 프로시저 생성 스크립트
 
 ```sql
-CREATE OR REPLACE PROCEDURE replace_view_keep_meta (
+CREATE OR REPLACE PROCEDURE p_replace_view_keep_meta (
     p_view_name IN VARCHAR2,
     p_sql       IN CLOB
 )
@@ -456,7 +458,7 @@ BEGIN
         || ' | 코멘트 복원 ' || l_cnt_c
         || ' | annotation 복원 ' || l_cnt_a
         || ' | 건너뜀(사라진 컬럼) ' || l_skipped);
-END replace_view_keep_meta;
+END p_replace_view_keep_meta;
 /
 ```
 
@@ -468,7 +470,7 @@ END replace_view_keep_meta;
 SET SERVEROUTPUT ON;
 
 BEGIN
-    replace_view_keep_meta(
+    p_replace_view_keep_meta(
         p_view_name => 'V_FACTSALESORDERFORCRM3YVR',
         p_sql       => q'[
             SELECT a.salesdate,
@@ -493,7 +495,7 @@ END;
 
 ```sql
 BEGIN
-    replace_view_keep_meta(
+    p_replace_view_keep_meta(
         p_view_name => 'V_FACTSALESORDERFORCRM3YVR',
         p_sql       => 'CREATE OR REPLACE VIEW v_factsalesorderforcrm3yvr AS
                         SELECT a.salesdate, a.brandname, a.salesamount
