@@ -636,6 +636,148 @@ END;
 /
 ```
 
+## Agent Team metadata 조회 함수 (`F_GET_DB_METADATA_BY_TEAM`)
+
+AI Agent Team 의 **TOOL_GET_METADATA**(custom function tool)가 사용하는 함수입니다. Team 이름을 입력하면 그 팀의
+**SQL tool 프로필**이 참조하는 **DB object metadata(테이블/컬럼/주석/규칙 정의)** 를 CLOB 로 반환합니다. Agent 가
+NL2SQL 로 SQL 을 만들기 전, 스키마 해석이 갈리는 질문에서 **추가정보 요청(human in the loop)·기준 판단의 근거**로
+이 metadata 를 확보하는 데 씁니다(앱 `chat_tl` 의 showprompt 메타데이터 추출 로직을 PL/SQL 로 이관한 것).
+
+- **입력**: `p_team_name` — Select AI Agent 팀 이름 (예: `TEAM_CREATE_SQL`, `TEAM_CROWN_NL2SQL`)
+- **반환**: `CLOB` — 그 팀 SQL tool 프로필의 metadata(테이블 정의만). 대상 프로필이 없으면 빈 CLOB.
+- **동작 순서**
+  1. 팀의 agent/task 가 쓰는 tool 중 `tool_type='SQL'` 인 tool 의 `tool_params.profile_name` 을 distinct 로 수집.
+  2. 각 프로필로 `DBMS_CLOUD_AI.GENERATE(action=>'showprompt')` 실행 → 반환 JSON 의 **SYSTEM role TEXT** 만 추출
+     → 마커 `Available Oracle SQL tables provided:` **이후(테이블 정의)만** 남김.
+     (마커 앞 지시문에는 "respond by explaining the reason" 이 있어 Agent 오작동을 유발하므로 제외 — metadata 만 반환)
+  3. 프로필이 2개 이상이면 `[PROFILE: 이름]` 헤더로 구분해 병합.
+- **선행 조건 / 주의**
+  - [DB 패키지 실행 권한 부여](#db-패키지-실행-권한-부여) 의 `DBMS_CLOUD_AI` EXECUTE 권한이 필요합니다.
+  - 대상 팀(agent/task/tool)이 이미 생성돼 있고, SQL tool 의 `tool_params.profile_name` 프로필이 **ENABLED** 여야 합니다.
+  - **접속 사용자 스키마에 생성**합니다(custom function tool 은 스키마 접두사 없이 함수명으로 호출 — 객체는 접속 사용자가 소유).
+  - 딕셔너리 뷰의 `attribute_value` 는 CLOB 이라 `tool_type` 비교는 `DBMS_LOB.SUBSTR` 로 처리합니다.
+  - 마커 절단은 SELECT(SQL) 안에서 수행 — `SUBSTR(CLOB)` 가 CLOB 를 반환해 32767 절단이 없습니다.
+
+### 함수 생성 스크립트
+
+```sql
+CREATE OR REPLACE FUNCTION F_GET_DB_METADATA_BY_TEAM(
+    p_team_name IN VARCHAR2
+) RETURN CLOB
+IS
+    c_marker   CONSTANT VARCHAR2(100) := 'Available Oracle SQL tables provided:';
+    c_ws       CONSTANT VARCHAR2(10)  := ' ' || CHR(9) || CHR(10) || CHR(13);  -- 공백/탭/개행
+    v_result   CLOB;
+    v_meta     CLOB;
+    v_profiles SYS.ODCIVARCHAR2LIST;
+    v_multi    BOOLEAN;
+BEGIN
+    DBMS_LOB.CREATETEMPORARY(v_result, TRUE);
+
+    -- 1) 팀 → SQL tool 의 distinct profile_name
+    SELECT DISTINCT JSON_VALUE(tp.attribute_value, '$.profile_name')
+    BULK COLLECT INTO v_profiles
+    FROM (
+        WITH team_agents AS (
+            SELECT jt.aname, jt.tname
+            FROM   USER_AI_AGENT_TEAM_ATTRIBUTES ta,
+                   JSON_TABLE(ta.attribute_value, '$[*]' COLUMNS(
+                       aname VARCHAR2(128) PATH '$.name',
+                       tname VARCHAR2(128) PATH '$.task')) jt
+            WHERE  ta.agent_team_name = p_team_name
+              AND  ta.attribute_name  = 'agents'
+        ),
+        tool_names AS (
+            SELECT tn.tool_name
+            FROM   team_agents g
+                   JOIN USER_AI_AGENT_ATTRIBUTES aa
+                     ON aa.agent_name = g.aname AND aa.attribute_name = 'tools',
+                   JSON_TABLE(aa.attribute_value, '$[*]' COLUMNS(
+                       tool_name VARCHAR2(128) PATH '$')) tn
+            UNION
+            SELECT tn.tool_name
+            FROM   team_agents g
+                   JOIN USER_AI_AGENT_TASK_ATTRIBUTES tka
+                     ON tka.task_name = g.tname AND tka.attribute_name = 'tools',
+                   JSON_TABLE(tka.attribute_value, '$[*]' COLUMNS(
+                       tool_name VARCHAR2(128) PATH '$')) tn
+        )
+        SELECT tp.attribute_value
+        FROM   tool_names t
+               JOIN USER_AI_AGENT_TOOL_ATTRIBUTES ty
+                 ON ty.tool_name = t.tool_name
+                AND ty.attribute_name = 'tool_type'
+                AND UPPER(DBMS_LOB.SUBSTR(ty.attribute_value, 100, 1)) = 'SQL'
+               JOIN USER_AI_AGENT_TOOL_ATTRIBUTES tp
+                 ON tp.tool_name = t.tool_name
+                AND tp.attribute_name = 'tool_params'
+    ) tp
+    WHERE JSON_VALUE(tp.attribute_value, '$.profile_name') IS NOT NULL;
+
+    -- 프로필이 없으면 빈 CLOB 반환
+    IF v_profiles IS NULL OR v_profiles.COUNT = 0 THEN
+        RETURN v_result;
+    END IF;
+    v_multi := v_profiles.COUNT > 1;
+
+    -- 2) 프로필별 showprompt → metadata 만 추출 → 병합
+    FOR i IN 1 .. v_profiles.COUNT LOOP
+        v_meta := NULL;
+        BEGIN
+            SELECT CASE
+                       WHEN INSTR(jt.ctext, c_marker) > 0
+                       THEN LTRIM(RTRIM(
+                                SUBSTR(jt.ctext, INSTR(jt.ctext, c_marker) + LENGTH(c_marker)),
+                                c_ws), c_ws)
+                       ELSE LTRIM(RTRIM(jt.ctext, c_ws), c_ws)
+                   END
+            INTO   v_meta
+            FROM   (SELECT DBMS_CLOUD_AI.GENERATE(
+                               prompt       => '스키마 확인',
+                               profile_name => v_profiles(i),
+                               action       => 'showprompt') AS j
+                    FROM dual) g,
+                   JSON_TABLE(g.j, '$[*]' COLUMNS(
+                       role VARCHAR2(40) PATH '$.role',
+                       NESTED PATH '$.content[*]' COLUMNS(
+                           ctype VARCHAR2(40) PATH '$.type',
+                           ctext CLOB        PATH '$.text'))) jt
+            WHERE  UPPER(jt.role)  = 'SYSTEM'
+              AND  UPPER(jt.ctype) = 'TEXT'
+            FETCH FIRST 1 ROWS ONLY;
+        EXCEPTION
+            WHEN OTHERS THEN
+                v_meta := NULL;  -- 이 프로필만 건너뜀(다른 프로필은 계속)
+        END;
+
+        IF v_meta IS NOT NULL AND DBMS_LOB.GETLENGTH(v_meta) > 0 THEN
+            IF DBMS_LOB.GETLENGTH(v_result) > 0 THEN
+                DBMS_LOB.APPEND(v_result, TO_CLOB(CHR(10) || CHR(10)));
+            END IF;
+            IF v_multi THEN
+                DBMS_LOB.APPEND(v_result, TO_CLOB('[PROFILE: ' || v_profiles(i) || ']' || CHR(10)));
+            END IF;
+            DBMS_LOB.APPEND(v_result, v_meta);
+        END IF;
+    END LOOP;
+
+    RETURN v_result;
+END F_GET_DB_METADATA_BY_TEAM;
+/
+/
+```
+
+### 사용 예 / 검증
+
+```sql
+-- 팀 이름으로 metadata 조회
+SELECT F_GET_DB_METADATA_BY_TEAM('TEAM_CREATE_SQL') AS metadata FROM dual;
+
+-- 컴파일 오류 확인
+SELECT line, position, text FROM USER_ERRORS
+ WHERE name = 'F_GET_DB_METADATA_BY_TEAM' ORDER BY sequence;
+```
+
 ## Select AI Test - Predefined Query 용 테이블 / 함수
 
 메뉴 **Select AI Test - Predefined Query** 가 사용하는 객체입니다. 사전정의 case 를

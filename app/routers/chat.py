@@ -81,7 +81,10 @@ async def chat_send(payload: dict, database: str = Depends(current_db)) -> dict:
         raise HTTPException(status_code=400,
                             detail={"error": "User Prompt 가 비어 있습니다 (Chat설정을 확인하세요)"})
 
-    reuse_conv = multi_turn and bool(conv_in)
+    # conversation_id 가 넘어오면(멀티턴 이어가기 또는 클라이언트 선생성) 그대로 재사용,
+    # 없으면 블록 안에서 CREATE_CONVERSATION 신규 생성(폴백). 선생성은 "..." 처리 중
+    # Thinking 링크를 붙이기 위한 것 — multi_turn 의미는 클라이언트가 재사용/선생성 판단으로 강제.
+    reuse_conv = bool(conv_in)
     user_prompt_sql, use_msg = _user_prompt_expr(user_prompt)
     plsql = build_run_team_block(
         variables=variables, reuse_conv=reuse_conv, user_prompt_sql=user_prompt_sql,
@@ -127,3 +130,25 @@ async def chat_send(payload: dict, database: str = Depends(current_db)) -> dict:
         "thinking": extras.get("thinking", {"rows": [], "error": None}),
         "raw_logs": extras.get("raw_logs", {}),
     }
+
+
+@router.post("/conversation")
+async def chat_conversation(database: str = Depends(current_db)) -> dict:
+    """빈 conversation 을 미리 생성해 id 를 반환한다. 화면이 "..." 처리 중에도
+    Thinking 링크(= 이 conversation 의 timeline 조회)를 붙일 수 있도록 하는 용도.
+    이후 /send 에 이 conversation_id 를 넘기면 RUN_TEAM 이 그대로 재사용한다."""
+    pool = db.get_pool(database)
+    try:
+        async with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                out_conv = cur.var(str, size=4000)
+                await cur.execute(
+                    "BEGIN :out_conv := DBMS_CLOUD_AI.CREATE_CONVERSATION(); END;",
+                    {"out_conv": out_conv},
+                )
+                conv_id = out_conv.getvalue() or ""
+            await conn.commit()
+    except Exception as exc:
+        logger.warning("chat create conversation failed: db=%s: %s", database, first_line(exc))
+        raise HTTPException(status_code=400, detail={"error": first_line(exc)})
+    return {"conversation_id": conv_id}

@@ -1542,9 +1542,11 @@ END;
   // (선택 요소 at-think-count 등은 if 가드가 있어 없어도 동작. renderTimeline 의 노드클릭
   //  팝업 showNodeModal 은 클로저로 자기완결적이라 함께 재사용됨.)
   // buildThinkingText/openAgentSuggestModal/openThinkingAnalyzeModal 도 함께 노출 —
-  //  Agent History 팝업의 Thinking 헤더에서 [AI 추천]·[Thinking과정분석] 버튼을 동일하게 쓴다.
+  //  Agent History 팝업의 Thinking 헤더에서 [AI 추천]·[Thinking과정분석]·[복사] 버튼을 동일하게 쓴다.
+  //  copyToClipboard 도 노출 — Agent History 의 Thinking 복사가 재사용.
   window.AgentTrace = {
     renderThinking, renderTimeline, renderOutput,
     buildThinkingText, openAgentSuggestModal, openThinkingAnalyzeModal,
+    copyToClipboard,
   };
 })();

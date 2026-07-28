@@ -106,6 +106,7 @@
               <div class="row" style="gap:var(--space-3);">
                 <button class="btn btn-ghost" id="ah-think-suggest" disabled>AI 추천</button>
                 <button class="btn btn-ghost" id="ah-think-analyze" disabled>Thinking과정분석</button>
+                <button class="btn btn-ghost" id="ah-think-copy" disabled>복사</button>
               </div>
             </div>
             <div class="panel-body"><div id="at-thinking"></div></div>
@@ -167,6 +168,19 @@
       analyzeBtn.disabled = !ready;
       suggestBtn.addEventListener("click", () => window.AgentTrace.openAgentSuggestModal(teamName, thinkingText));
       analyzeBtn.addEventListener("click", () => window.AgentTrace.openThinkingAnalyzeModal(teamName, thinkingText));
+    }
+    // Thinking 복사 — AI Agent Team Test 의 [복사] 와 동일 동작(thinking 단계 전체를 텍스트로).
+    const copyBtn = backdrop.querySelector("#ah-think-copy");
+    if (copyBtn) {
+      copyBtn.disabled = !thinkingText;
+      copyBtn.addEventListener("click", async () => {
+        if (!thinkingText) { window.Toast.show("복사할 thinking 단계가 없습니다", "warn"); return; }
+        const ok = await window.AgentTrace.copyToClipboard(thinkingText);
+        window.Toast.show(
+          ok ? `Thinking ${thinkingRows.length}단계 복사됨` : "복사 실패 — 직접 선택해 복사하세요",
+          ok ? "success" : "error",
+        );
+      });
     }
   }
 

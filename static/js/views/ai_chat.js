@@ -458,10 +458,27 @@
     function addTyping() {
       const msg = document.createElement("div");
       msg.className = "chat-msg bot";
-      msg.innerHTML = `<div class="chat-bubble chat-typing"><span></span><span></span><span></span></div>`;
+      // 버블 + (선택) Thinking 링크가 한 줄에 나란히 보이도록 flex row 로 감싼다.
+      msg.innerHTML = `<div style="display:flex; align-items:center; gap:var(--space-2);">
+        <div class="chat-bubble chat-typing"><span></span><span></span><span></span></div>
+      </div>`;
       messagesEl.appendChild(msg);
       scrollToBottom();
       return msg;
+    }
+
+    // "..." 처리 중 버블 옆에 🧠 Thinking 링크를 붙인다 — 클릭 시 진행 중 conversation 의
+    // thinking 스냅샷을 popup(openThinkingModal)으로 조회(결과 후 링크와 동일 팝업).
+    function attachTypingThinking(typingMsg, convId) {
+      if (!typingMsg || !convId) return;
+      const row = typingMsg.firstElementChild || typingMsg;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-ghost btn-mini";
+      btn.textContent = "🧠 Thinking";
+      btn.addEventListener("click", () => openThinkingModal(convId, null));
+      row.appendChild(btn);
+      scrollToBottom();
     }
 
     function autoGrow() {
@@ -490,14 +507,26 @@
 
       const typing = addTyping();
       try {
+        // 대화 id 확보 — 이어가기(멀티턴 + 직전 id)면 재사용, 아니면 선생성.
+        // 선생성해 두면 "..." 처리 중에도 그 옆에 Thinking 링크를 붙일 수 있다(모든 메시지 대상).
+        // 선생성 실패 시엔 "" 로 두어 백엔드가 내부 생성(기존 동작, 링크만 생략).
+        let convForTurn = (multiTurn && convId) ? convId : "";
+        if (!convForTurn) {
+          try {
+            const c = await window.API.post("/api/chat/conversation", {});
+            convForTurn = c.conversation_id || "";
+          } catch (e) { convForTurn = ""; }
+        }
+        if (convForTurn) attachTypingThinking(typing, convForTurn);
+
         const res = await window.API.post("/api/chat/send", {
           team: cfg.team,
           variables: cfg.variables,
           user_prompt: cfg.userPrompt,
           message: text,
           multi_turn: multiTurn,
-          // Multi Turn ON 이면 직전 conversation_id 를 넘겨 컨텍스트 유지
-          conversation_id: multiTurn ? convId : "",
+          // 선생성/이어가기 id 를 그대로 전달(있으면 백엔드가 재사용). 없으면 기존 폴백.
+          conversation_id: convForTurn || (multiTurn ? convId : ""),
         });
         typing.remove();
         if (multiTurn && res.conversation_id) convId = res.conversation_id;
