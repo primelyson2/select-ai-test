@@ -251,26 +251,22 @@ project/   (= GitHub 리포 select-ai-test 루트)
 
 | 증상 | 원인 / 해결 |
 |---|---|
-| 기동 시 `database unavailable` | `config.yaml` 의 `wallet_password` 또는 `dsn` 오류. 로그에서 ORA 메시지 확인. |
-| `DPY-3022: named time zones are not supported` | `oracledb` thin mode 가 `TIMESTAMP WITH TIME ZONE` 미지원. 본 도구는 `CAST(SYS_EXTRACT_UTC(...) AS TIMESTAMP)` 로 우회 — 사용자 SQL 추가 시 동일 패턴 적용. |
-| `Annotations: 미지원` 배지 | DB 버전이 23ai 미만이거나 `USER_ANNOTATIONS_USAGE` 뷰 없음. Annotation 기능만 비활성. |
-| `DPY-4008: no bind placeholder ... :txt` | thin mode async 가 일부 DDL (COMMENT ON ...) 의 bind 를 인식 못 함. 본 도구는 SQL literal + single-quote escape 로 우회. |
-| 포트 점유 | `bash scripts/stop.sh` 또는 `lsof -i :8000` 후 `kill <PID>` |
-| `RUN_TEAM` 응답이 즉시 오류 | Team / Task / Tool 구성의 참조 무결성 문제 (`ORA-20051: Task X does not exist` 등). `*_ATTRIBUTES` 의 JSON 값 확인. |
+| 화면에 **"접속 가능한 DB가 없습니다"** | 등록된 DB 가 없거나 모든 DB 풀 초기화 실패. **[Database 관리]** 에서 DB 를 등록/수정하고 **연결 테스트**. (Database 관리·Tool관리·API관리 화면은 DB 없이도 진입 가능) |
+| **DB 연결 실패 / 연결 테스트 오류** (`ORA-12154`(DSN alias 불일치)·`ORA-01017`(사용자·비밀번호)·Wallet 비밀번호 오류) | [Database 관리] 에서 **DSN(`_high` 등)·DB 사용자·비밀번호·Wallet 비밀번호** 를 재확인하고 Wallet zip 을 다시 업로드. 로그의 ORA 메시지로 원인 확인. |
+| `/api/...` 호출이 **`{"error":"unauthorized"}` (401)** | 접근 키가 설정된 배포에서는 `/api/*` 가 로그인 쿠키로 보호됨 — 첫 진입 시 **접근 키로 로그인** 필요(키 분실 시 [Tool관리] 에서 복구). 접근 키 미설정 배포는 해당 없음. |
+| **SELECT AI 생성 시 인가 오류** (`ORA-20401`·`NotAuthorizedOrNotFound`·`...my$cloud_domain...`) | ADB 가 OCI Generative AI 를 호출할 **IAM 정책 / Principal Auth 미비**. **[Prerequisites.md](Prerequisites.md)** 의 GenAI 정책·`ENABLE_PRINCIPAL_AUTH` 설정. (간헐적 OCI 측 오류면 잠시 후 재시도) |
+| **`ORA-20000: Data access is disabled for SELECT AI.`** | `DISABLE_DATA_ACCESS()` 로 실데이터 접근이 꺼져 `runsql`/`narrate` 가 차단(`showsql`/`explainsql` 은 동작). 필요 시 `DBMS_CLOUD_AI.ENABLE_DATA_ACCESS()` — [Prerequisites.md](Prerequisites.md). |
+| `Annotations: 미지원` 배지 | DB 가 23ai 미만이거나 `USER_ANNOTATIONS_USAGE` 뷰 없음 → Annotation 영역만 비활성(Comment 는 정상). |
+| `RUN_TEAM` 응답이 즉시 오류 | Team / Task / Tool 구성의 참조 무결성 문제 (`ORA-20051: Task X does not exist` 등). 해당 `*_ATTRIBUTES` 의 JSON(`tools`/`agents` 등) 값 확인. |
+| **HTTPS(LB) 배포에서 오래 걸리는 요청이 HTTP 504** | SELECT AI / RUN_TEAM 등 백엔드 처리시간이 **Load Balancer 리스너의 유휴 제한 시간(idle timeout)** 을 초과. **OCI 콘솔 → Load Balancer → Listeners → (해당 리스너) Edit → Connection Configuration → 유휴 제한 시간(초)** 을 넉넉히 상향(예: 60초 → 300초 이상, 예상 최장 응답보다 크게). LLM 호출은 수 초~수십 초 걸릴 수 있음. (HTTP 직접 배포는 LB 가 없어 해당 없음) |
+| **OCI 배포 후 URL 접속이 안 됨** | 부팅 후 `git clone`+`uv sync` 에 1~3분 소요 — 잠시 후 재시도, 또는 SSH 로 `sudo tail -f /var/log/select-ai-deploy.log` · `systemctl status select-ai-test` · `journalctl -u select-ai-test -f` 확인. HTTPS 는 **LB Backend health(OK)** 와 서브넷 인바운드(443 / 앱 포트)도 점검. |
+| 로컬 **포트 점유** | `bash scripts/stop.sh` 또는 `lsof -i :8000` 후 `kill <PID>`. |
 
 ---
 
-## 7. 제한 사항 / 범위 외
+## 7. 제한 사항
 
-PoC 단계 도구로 다음 항목은 의도적으로 구현하지 않았습니다:
-
-- 사용자 인증 / 권한 관리
-- Profile / Agent 의 신규 생성 (DDL 수준 관리는 미지원, 조회·측정만)
-- 측정 결과 영속화 (세션 단위 휘발)
-- 다국어 (한국어 UI 만)
-- 테이블 / 컬럼의 신규 생성 / 삭제 (Comment / Annotation 수정에 한정)
-
-운영 환경 도입 시 HTTPS 종단 (nginx / Oracle Load Balancer), 다중 사용자 인증 (OAuth / mTLS), 모니터링 등을 별도로 구성하세요.
+PoC 전용으로 잠시 사용하는 용도로, 보안이나 운영을 고려한 구현이 되어 있지 않습니다.
 
 ---
 
