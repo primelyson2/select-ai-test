@@ -427,7 +427,7 @@
       if (debug && debug.conv_reset) {
         const info = document.createElement("div");
         info.className = "chat-debug";
-        info.textContent = "ℹ 오류없이 답변이 생성되어 프롬프트 초기화됩니다";
+        info.textContent = "🔄 정상 답변으로 대화가 초기화되었습니다 — 다음 질문은 새 conversation 으로 시작합니다";
         msg.appendChild(info);
       }
       messagesEl.appendChild(msg);
@@ -670,9 +670,15 @@
         // 대화 누적이 다음 질문의 프롬프트를 오염시키지 않도록 conversation 만 초기화 (화면 메시지 유지).
         // 오류가 있으면 conversation 을 유지해 후속 질문이 문맥을 이어받게 한다.
         const allOk = results.length > 0 && !res.stage && results.every((r) => !r.error);
+        // HITL 추가정보 요청("확인이 필요합니다")이면 오류처럼 conversation 을 유지해
+        // 사용자의 후속 답변(번호/'기본값으로')이 같은 대화로 이어져 resume 되게 한다(멀티턴 OFF 여도 유지).
+        // HITL 되묻기 감지 — HITL 메시지에는 instruction 상 "HITL" 문자열이 포함된다(그것만으로 판별).
+        const isHitl = !results.length && !!res.answer && res.answer.includes("HITL");
         if (allOk) {
           convId = "";
           debug.conv_reset = true;
+        } else if (isHitl && res.conversation_id) {
+          convId = res.conversation_id;
         }
         if (results.length) {
           debug.sql_count = results.length;

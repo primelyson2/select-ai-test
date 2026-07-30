@@ -322,7 +322,7 @@
       teams = MOCK_TEAMS.slice();
     }
 
-    let multiTurn = false;   // Multi Turn 활성/비활성 상태 (기본 OFF)
+    let multiTurn = true;   // Multi Turn 활성/비활성 상태 (기본 ON)
     let convId = "";        // Multi Turn ON 시 유지되는 conversation_id
 
     const panel = document.createElement("div");
@@ -397,6 +397,13 @@
       // 단계별 소요시간 인라인 (접이식) — timeline 이 있으면 답변 아래에 표시
       if (debug && debug.timeline && debug.timeline.length) {
         msg.appendChild(buildStepTimes(debug.timeline, debug.multi_turn));
+      }
+      // 정상 답변으로 conversation 이 초기화(다음 질문부터 새 conversation)된 경우 답변 밑에 안내
+      if (debug && debug.conv_reset) {
+        const info = document.createElement("div");
+        info.className = "chat-debug";
+        info.textContent = "🔄 정상 답변으로 대화가 초기화되었습니다 — 다음 질문은 새 conversation 으로 시작합니다";
+        msg.appendChild(info);
       }
       messagesEl.appendChild(msg);
       scrollToBottom();
@@ -531,14 +538,28 @@
         typing.remove();
         if (multiTurn && res.conversation_id) convId = res.conversation_id;
         else if (!multiTurn) convId = "";
-        addMessage("bot", res.answer || "(빈 응답)", {
+        const debug = {
           conversation_id: res.conversation_id,
           elapsed_ms: res.elapsed_ms,
           team: cfg.team,
           multi_turn: multiTurn,
           timeline: res.timeline || [],
           thinking: res.thinking || { rows: [], error: null },
-        });
+        };
+        // 답변 처리 (AI Chat for Table list 와 동일 취지):
+        //  - HITL 추가정보 요청("확인이 필요합니다")이면 오류처럼 conversation 을 유지해
+        //    사용자의 후속 답변(번호/'기본값으로')이 같은 대화로 이어져 resume 되게 한다(멀티턴 OFF 여도 유지).
+        //  - 그 외 정상 최종답변이면 다음 질문이 이전 대화 누적에 오염되지 않도록 conversation 초기화(화면 메시지 유지).
+        // HITL 되묻기 감지 — HITL 메시지에는 instruction 상 "HITL" 문자열이 포함된다(그것만으로 판별).
+        const isHitl = !!res.answer && res.answer.includes("HITL");
+        const answerOk = !!(res.answer && res.answer.trim()) && !isHitl;
+        if (isHitl) {
+          if (res.conversation_id) convId = res.conversation_id;
+        } else if (answerOk) {
+          convId = "";
+          debug.conv_reset = true;
+        }
+        addMessage("bot", res.answer || "(빈 응답)", debug);
       } catch (e) {
         typing.remove();
         addMessage("bot", "오류: " + errMsg(e, "전송 실패"), {
@@ -577,7 +598,7 @@
       setMultiTurn(!multiTurn);
       convId = "";  // 모드 전환 시 대화 컨텍스트 초기화 (다음 전송부터 새 conversation)
     });
-    setMultiTurn(multiTurn);  // 기본 OFF — 토글 UI(색상/노브) 초기 상태 동기화
+    setMultiTurn(multiTurn);  // 기본 ON — 토글 UI(색상/노브) 초기 상태 동기화
 
     panel.querySelector("#chat-new").addEventListener("click", resetChat);
 
