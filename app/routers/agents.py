@@ -237,8 +237,9 @@ async def team_history(
     상세는 각 행의 conversation_id 로 /conversations/{cid}/timeline 을 재사용한다.
     필터:
       · question : 질문(해당 conversation 첫 user 프롬프트) 부분일치(LIKE, 대소문자 무시)
-      · start/end: start_date(UTC) 범위(양끝 포함). datetime-local ISO 문자열.
-    TIMESTAMP WITH TIME ZONE 은 thin mode 미지원 → CAST AS TIMESTAMP (UTC).
+      · start/end: start_date(KST, Asia/Seoul) 범위(양끝 포함). datetime-local ISO 문자열(브라우저 로컬=KST).
+    TIMESTAMP WITH TIME ZONE 은 thin mode 미지원 → AT TIME ZONE 'Asia/Seoul' 후 CAST AS TIMESTAMP (KST).
+    표시·검색·정렬 모두 인라인 뷰의 KST start_date 별칭을 참조하므로 일관.
     question 서브쿼리를 WHERE 와 SELECT 양쪽에서 쓰기 위해 인라인 뷰로 감쌌다.
     바인드명 start/end 는 Oracle 예약어(START/END) → sdt/edt 사용."""
     conds: list[str] = []
@@ -268,8 +269,8 @@ async def team_history(
         database,
         "SELECT * FROM ("
         "  SELECT h.team_exec_id, h.team_name, h.state, h.conversation_id, "
-        "         CAST(SYS_EXTRACT_UTC(h.start_date) AS TIMESTAMP) AS start_date, "
-        "         CAST(SYS_EXTRACT_UTC(h.end_date)   AS TIMESTAMP) AS end_date, "
+        "         CAST(h.start_date AT TIME ZONE 'Asia/Seoul' AS TIMESTAMP) AS start_date, "
+        "         CAST(h.end_date   AT TIME ZONE 'Asia/Seoul' AS TIMESTAMP) AS end_date, "
         "         (SELECT prompt FROM ("
         "            SELECT prompt FROM USER_CLOUD_AI_CONVERSATION_PROMPTS p "
         "             WHERE p.conversation_id = h.conversation_id AND p.prompt IS NOT NULL "

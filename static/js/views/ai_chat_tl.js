@@ -730,16 +730,34 @@
 
     panel.querySelector("#ctl-new").addEventListener("click", resetChat);
 
-    // --- Chat설정 저장/불러오기 (localStorage, 세션 간 유지) — AI Chat 과 키 분리 ---
-    const CONFIG_KEY = "aiChatTl.savedConfigs";
+    // --- Chat설정 저장/불러오기 (서버 파일, DB별) — AI Chat 과 메뉴 분리 ---
+    // 메뉴별·DB별로 project/chat_configs/<db>/aiChatTl.json 에 저장. 읽기는 캐시(configs)로 동기 처리.
+    const CONFIG_KEY = "aiChatTl.savedConfigs";  // 레거시 localStorage 키 (최초 1회 이관용)
+    const MENU = "aiChatTl";
+    let configs = [];  // 현재 DB 의 Chat설정 캐시 (initConfigs 로 서버에서 채움)
     const configSel = panel.querySelector("#ctl-config");
     const configAddBtn = panel.querySelector("#ctl-config-add");
     const configUpdateBtn = panel.querySelector("#ctl-config-update");
 
-    const loadConfigs = () => {
-      try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; }
-      catch (e) { return []; }
-    };
+    const loadConfigs = () => configs;  // 캐시 반환 (동기 리더용)
+    async function fetchConfigs() {
+      try { const l = await window.API.get(`/api/chat-configs/${MENU}`); return Array.isArray(l) ? l : []; }
+      catch (e) { window.Toast && window.Toast.show("Chat설정 불러오기 실패", "error"); return []; }
+    }
+    async function persistConfigs(list) { await window.API.put(`/api/chat-configs/${MENU}`, list); }
+    function readLegacy() { try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; } catch (e) { return []; } }
+    // 서버 로드 + (서버 비어있고 localStorage 에 기존 설정 있으면) 최초 1회 파일 이관
+    async function initConfigs() {
+      let list = await fetchConfigs();
+      if (!list.length) {
+        const legacy = readLegacy();
+        if (legacy.length) {
+          try { await persistConfigs(legacy); list = legacy; window.Store.remove(CONFIG_KEY); } catch (e) { /* 이관 실패 시 무시 */ }
+        }
+      }
+      configs = list;
+      refreshConfigs();
+    }
     const refreshConfigs = (selectName) => {
       const list = loadConfigs();
       configSel.innerHTML = "";
@@ -755,7 +773,7 @@
       });
       if (selectName != null) configSel.value = selectName;
     };
-    refreshConfigs();
+    initConfigs();  // 서버에서 Chat설정 로드(+최초 이관) 후 드롭다운 렌더
 
     // 추가 — 빈 팝업을 열어 새 설정을 입력받아 저장
     configAddBtn.addEventListener("click", () => {
@@ -849,10 +867,10 @@
       const scriptLink = backdrop.querySelector("#cfg-script");
       scriptLink.addEventListener("click", showScript);
       scriptLink.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showScript(); } });
-      backdrop.querySelector("#cfg-save").addEventListener("click", () => {
+      backdrop.querySelector("#cfg-save").addEventListener("click", async () => {
         const name = nameEl.value.trim();
         if (!name) { window.Toast.show("설정 이름을 입력하세요", "error"); nameEl.focus(); return; }
-        const list = loadConfigs();
+        const list = loadConfigs().slice();  // 캐시 복사 후 수정 (저장 성공 시 반영)
         // 중복 이름 검사 — 수정 시 자기 자신(원래 이름)은 제외
         if (list.some((c) => c.name === name && c.name !== origName)) {
           window.Toast.show("이미 있는 이름입니다", "error");
@@ -865,7 +883,9 @@
         } else {
           list.push(entry);
         }
-        window.Store.set(CONFIG_KEY, JSON.stringify(list));
+        try { await persistConfigs(list); }
+        catch (e) { window.Toast.show("Chat설정 저장 실패", "error"); return; }
+        configs = list;
         refreshConfigs(name);
         // 위험 패턴은 차단하지 않고 경고만 (저장은 진행) — PoC, 작성자는 신뢰된 테스터
         const warns = userPromptWarnings(promptEl.value);

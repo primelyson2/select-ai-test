@@ -37,10 +37,28 @@
     return (err && err.message) || fallback || "요청 실패";
   }
 
-  const loadConfigs = () => {
-    try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; }
-    catch (e) { return []; }
-  };
+  // Chat설정은 서버 파일(project/chat_configs/<db>/nl2sql.json)로 관리. 읽기는 캐시(configs)로 동기 처리.
+  const MENU = "nl2sql";
+  let configs = [];  // 현재 DB 의 Chat설정 캐시 (loadOrMigrateConfigs 로 서버에서 채움)
+  const loadConfigs = () => configs;  // 캐시 반환 (동기 리더용)
+  async function fetchConfigs() {
+    try { const l = await window.API.get(`/api/chat-configs/${MENU}`); return Array.isArray(l) ? l : []; }
+    catch (e) { window.Toast && window.Toast.show("Chat설정 불러오기 실패", "error"); return []; }
+  }
+  async function persistConfigs(list) { await window.API.put(`/api/chat-configs/${MENU}`, list); }
+  function readLegacy() { try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; } catch (e) { return []; } }
+  // 서버 로드 + (서버 비어있고 localStorage 에 기존 설정 있으면) 최초 1회 파일 이관
+  async function loadOrMigrateConfigs() {
+    let list = await fetchConfigs();
+    if (!list.length) {
+      const legacy = readLegacy();
+      if (legacy.length) {
+        try { await persistConfigs(legacy); list = legacy; window.Store.remove(CONFIG_KEY); } catch (e) { /* 이관 실패 시 무시 */ }
+      }
+    }
+    configs = list;
+    return list;
+  }
 
   // 입력 필드 + (제목/추가/수정/콤보) 저장 프롬프트 콤보 연결.
   // shape: [{title, prompt}] — Profile Test 화면과 동일 규약.
@@ -520,7 +538,7 @@
       });
       if (selectName != null) configSel.value = selectName;
     };
-    refreshConfigs();
+    loadOrMigrateConfigs().then(() => refreshConfigs());  // 서버에서 Chat설정 로드(+최초 이관) 후 렌더
 
     panel.querySelector("#nl-config-add").addEventListener("click", () => {
       openConfigModal("add", { name: "", profile: "", userPrompt: DEFAULT_USER_PROMPT, mode: "dbms_cloud_ai", retentionDays: 7 }, refreshConfigs);
@@ -928,12 +946,12 @@
       }
       openScriptModal(script);
     });
-    backdrop.querySelector("#cfg-save").addEventListener("click", () => {
+    backdrop.querySelector("#cfg-save").addEventListener("click", async () => {
       const name = nameEl.value.trim();
       if (!name) { window.Toast.show("설정 이름을 입력하세요", "error"); nameEl.focus(); return; }
       const rd = parseInt(retEl.value, 10);
       if (!Number.isFinite(rd) || rd < 7) { window.Toast.show("대화보관기간은 7 이상이어야 합니다", "error"); retEl.focus(); return; }
-      const list = loadConfigs();
+      const list = loadConfigs().slice();  // 캐시 복사 후 수정 (저장 성공 시 반영)
       if (list.some((c) => c.name === name && c.name !== origName)) {
         window.Toast.show("이미 있는 이름입니다", "error");
         return;
@@ -945,7 +963,9 @@
       } else {
         list.push(entry);
       }
-      window.Store.set(CONFIG_KEY, JSON.stringify(list));
+      try { await persistConfigs(list); }
+      catch (e) { window.Toast.show("Chat설정 저장 실패", "error"); return; }
+      configs = list;
       if (onSaved) onSaved(name);
       window.Toast.show(`'${name}' ${mode === "add" ? "저장" : "수정"}됨`, "success");
       close();

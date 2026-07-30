@@ -323,7 +323,9 @@
     }
 
     let multiTurn = true;   // Multi Turn 활성/비활성 상태 (기본 ON)
+    let resetOnAnswer = true; // 정상답변 시 conversation id 초기화 여부 (기본 ON, 세션 기본값)
     let convId = "";        // Multi Turn ON 시 유지되는 conversation_id
+    let lastConvId = "";    // 정상답변으로 방금 초기화된 직전 conversation_id (이어서 질문 시 복원용)
 
     const panel = document.createElement("div");
     panel.className = "panel chat-panel";
@@ -337,6 +339,11 @@
         </div>
         <div class="row" style="gap:var(--space-3); align-items:center;">
           <button class="btn btn-ghost" id="chat-new">＋ 새 대화</button>
+          <label style="color:var(--text-muted); font-size:var(--fs-sm);">정상답변시 대화초기화</label>
+          <button class="switch" id="chat-reset-onanswer" type="button"
+            role="switch" aria-checked="true" title="정상답변 후 대화 초기화(새 conversation). Multi Turn ON 일 때만 활성화됩니다.">
+            <span class="switch-knob"></span>
+          </button>
           <label style="color:var(--text-muted); font-size:var(--fs-sm);">Multi Turn</label>
           <button class="switch" id="chat-multiturn" type="button"
             role="switch" aria-checked="false" title="Multi Turn 대화 컨텍스트 유지 여부">
@@ -356,8 +363,21 @@
         <textarea id="chat-input" rows="1" placeholder="메시지를 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
         <button class="btn btn-primary" id="chat-send">전송</button>
       </div>
+      <div class="chat-continue-row" id="chat-continue-row"
+           style="display:none; justify-content:flex-end; align-items:center; gap:6px; padding:4px var(--space-4); font-size:var(--fs-sm); color:var(--text-muted);">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          이어서 질문하기
+          <input type="checkbox" id="chat-continue" style="margin:0;" />
+        </label>
+      </div>
     `;
     main.appendChild(panel);
+
+    // '이어서 질문하기' — 정상답변 초기화 직후 노출, 체크 시 직전 conversation 유지
+    const continueRow = panel.querySelector("#chat-continue-row");
+    const continueChk = panel.querySelector("#chat-continue");
+    continueChk.addEventListener("change", () => { convId = continueChk.checked ? lastConvId : ""; });
+    function hideContinue() { continueRow.style.display = "none"; continueChk.checked = false; }
 
     const messagesEl = panel.querySelector("#chat-messages");
     const inputEl = panel.querySelector("#chat-input");
@@ -511,13 +531,15 @@
       addMessage("user", text);
       inputEl.value = "";
       autoGrow();
+      hideContinue();  // 전송 시작 — 이전 '이어서 질문하기' 행 정리(convId 는 이미 확정됨)
 
       const typing = addTyping();
       try {
-        // 대화 id 확보 — 이어가기(멀티턴 + 직전 id)면 재사용, 아니면 선생성.
+        // 대화 id 확보 — convId 가 있으면(멀티턴 연속 / HITL·무데이터 유지 / '이어서 질문하기' 체크로 복원) 재사용, 아니면 선생성.
+        // 정상답변 초기화 시 convId 는 "" 가 되며, '이어서 질문하기' 를 체크해야만 직전 id 로 복원된다.
         // 선생성해 두면 "..." 처리 중에도 그 옆에 Thinking 링크를 붙일 수 있다(모든 메시지 대상).
         // 선생성 실패 시엔 "" 로 두어 백엔드가 내부 생성(기존 동작, 링크만 생략).
-        let convForTurn = (multiTurn && convId) ? convId : "";
+        let convForTurn = convId || "";
         if (!convForTurn) {
           try {
             const c = await window.API.post("/api/chat/conversation", {});
@@ -547,19 +569,26 @@
           thinking: res.thinking || { rows: [], error: null },
         };
         // 답변 처리 (AI Chat for Table list 와 동일 취지):
-        //  - HITL 추가정보 요청("확인이 필요합니다")이면 오류처럼 conversation 을 유지해
-        //    사용자의 후속 답변(번호/'기본값으로')이 같은 대화로 이어져 resume 되게 한다(멀티턴 OFF 여도 유지).
+        //  - HITL 추가정보 요청이거나, runsql 조회 결과가 0행("데이터가 조회되지 않았습니다")이면
+        //    오류처럼 conversation 을 유지해 후속 답변/재질문이 같은 대화로 이어지게 한다(멀티턴 OFF 여도 유지).
         //  - 그 외 정상 최종답변이면 다음 질문이 이전 대화 누적에 오염되지 않도록 conversation 초기화(화면 메시지 유지).
-        // HITL 되묻기 감지 — HITL 메시지에는 instruction 상 "HITL" 문자열이 포함된다(그것만으로 판별).
+        // HITL 되묻기·무데이터 감지 — instruction 상 HITL 메시지엔 "HITL", 조회 0행 답변엔 첫 줄 "데이터가 조회되지 않았습니다" 가 포함된다.
+        // 정상답변 초기화는 '정상답변시 conversation id 초기화' 체크박스(resetOnAnswer)가 켜졌을 때만 적용한다.
         const isHitl = !!res.answer && res.answer.includes("HITL");
-        const answerOk = !!(res.answer && res.answer.trim()) && !isHitl;
-        if (isHitl) {
+        const noData = !!res.answer && res.answer.includes("데이터가 조회되지 않았습니다");
+        const keepConv = isHitl || noData;
+        const answerOk = !!(res.answer && res.answer.trim()) && !keepConv;
+        if (keepConv) {
           if (res.conversation_id) convId = res.conversation_id;
-        } else if (answerOk) {
+        } else if (answerOk && resetOnAnswer) {
+          lastConvId = res.conversation_id || "";
           convId = "";
           debug.conv_reset = true;
+          debug.show_continue = true;  // '새 대화로 시작합니다'(conv_reset)가 뜰 때만 '이어서 질문하기' 노출
         }
         addMessage("bot", res.answer || "(빈 응답)", debug);
+        // 정상답변 초기화(새 대화 안내)가 뜬 경우에만 '이어서 질문하기' 체크박스 노출(해제 상태)
+        if (debug.show_continue) { continueChk.checked = false; continueRow.style.display = "flex"; }
       } catch (e) {
         typing.remove();
         addMessage("bot", "오류: " + errMsg(e, "전송 실패"), {
@@ -576,6 +605,7 @@
     function resetChat() {
       messagesEl.innerHTML = "";
       convId = "";  // 새 대화 → conversation 초기화
+      hideContinue();
       addMessage("bot", GREETING);
     }
 
@@ -589,30 +619,66 @@
     });
     // Multi Turn 토글 — ON 이면 .on 클래스로 색상/노브 위치가 바뀐다.
     const multiTurnBtn = panel.querySelector("#chat-multiturn");
+    // 정상답변시 대화초기화 토글 — Multi Turn 과 동일한 switch 형태. Multi Turn ON 일 때만 활성.
+    const resetBtn = panel.querySelector("#chat-reset-onanswer");
+    function setResetOnAnswer(val) {
+      resetOnAnswer = !!val;
+      resetBtn.setAttribute("aria-checked", resetOnAnswer ? "true" : "false");
+      resetBtn.classList.toggle("on", resetOnAnswer);
+    }
+    function syncResetEnabled() {
+      // Multi Turn OFF 면 초기화 스위치를 비활성(회색)으로 — 어차피 매 질문 새 conversation.
+      resetBtn.disabled = !multiTurn;
+      resetBtn.style.opacity = multiTurn ? "" : "0.4";
+      resetBtn.style.pointerEvents = multiTurn ? "" : "none";
+    }
+    resetBtn.addEventListener("click", () => {
+      if (!resetBtn.disabled) setResetOnAnswer(!resetOnAnswer);
+    });
     function setMultiTurn(val) {
       multiTurn = !!val;
       multiTurnBtn.setAttribute("aria-checked", multiTurn ? "true" : "false");
       multiTurnBtn.classList.toggle("on", multiTurn);
+      syncResetEnabled();  // Multi Turn 상태에 따라 초기화 스위치 활성/비활성 동기화
     }
     multiTurnBtn.addEventListener("click", () => {
       setMultiTurn(!multiTurn);
       convId = "";  // 모드 전환 시 대화 컨텍스트 초기화 (다음 전송부터 새 conversation)
+      hideContinue();
     });
-    setMultiTurn(multiTurn);  // 기본 ON — 토글 UI(색상/노브) 초기 상태 동기화
+    setResetOnAnswer(resetOnAnswer);  // 기본 ON — 스위치 초기 상태 동기화
+    setMultiTurn(multiTurn);          // 기본 ON — 토글 UI + 초기화 스위치 활성 상태 동기화
 
     panel.querySelector("#chat-new").addEventListener("click", resetChat);
 
-    // --- Chat설정 저장/불러오기 (localStorage, 세션 간 유지) ---
-    // 하나의 설정은 현재 채팅 구성(현재는 Multi Turn 상태)을 담는다.
-    const CONFIG_KEY = "aiChat.savedConfigs";
+    // --- Chat설정 저장/불러오기 (서버 파일, DB별) ---
+    // 메뉴별·DB별로 project/chat_configs/<db>/aiChat.json 에 저장. 읽기는 캐시(configs)로 동기 처리.
+    const CONFIG_KEY = "aiChat.savedConfigs";  // 레거시 localStorage 키 (최초 1회 이관용)
+    const MENU = "aiChat";
+    let configs = [];  // 현재 DB 의 Chat설정 캐시 (initConfigs 로 서버에서 채움)
     const configSel = panel.querySelector("#chat-config");
     const configAddBtn = panel.querySelector("#chat-config-add");
     const configUpdateBtn = panel.querySelector("#chat-config-update");
 
-    const loadConfigs = () => {
-      try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; }
-      catch (e) { return []; }
-    };
+    const loadConfigs = () => configs;  // 캐시 반환 (동기 리더용)
+    async function fetchConfigs() {
+      try { const l = await window.API.get(`/api/chat-configs/${MENU}`); return Array.isArray(l) ? l : []; }
+      catch (e) { window.Toast && window.Toast.show("Chat설정 불러오기 실패", "error"); return []; }
+    }
+    async function persistConfigs(list) { await window.API.put(`/api/chat-configs/${MENU}`, list); }
+    function readLegacy() { try { return JSON.parse(window.Store.get(CONFIG_KEY)) || []; } catch (e) { return []; } }
+    // 서버 로드 + (서버 비어있고 localStorage 에 기존 설정 있으면) 최초 1회 파일 이관
+    async function initConfigs() {
+      let list = await fetchConfigs();
+      if (!list.length) {
+        const legacy = readLegacy();
+        if (legacy.length) {
+          try { await persistConfigs(legacy); list = legacy; window.Store.remove(CONFIG_KEY); } catch (e) { /* 이관 실패 시 무시 */ }
+        }
+      }
+      configs = list;
+      refreshConfigs();
+    }
     const refreshConfigs = (selectName) => {
       const list = loadConfigs();
       configSel.innerHTML = "";
@@ -628,7 +694,7 @@
       });
       if (selectName != null) configSel.value = selectName;
     };
-    refreshConfigs();
+    initConfigs();  // 서버에서 Chat설정 로드(+최초 이관) 후 드롭다운 렌더
 
     // 추가 — 빈 팝업을 열어 새 설정을 입력받아 저장
     configAddBtn.addEventListener("click", () => {
@@ -722,10 +788,10 @@
       const scriptLink = backdrop.querySelector("#cfg-script");
       scriptLink.addEventListener("click", showScript);
       scriptLink.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showScript(); } });
-      backdrop.querySelector("#cfg-save").addEventListener("click", () => {
+      backdrop.querySelector("#cfg-save").addEventListener("click", async () => {
         const name = nameEl.value.trim();
         if (!name) { window.Toast.show("설정 이름을 입력하세요", "error"); nameEl.focus(); return; }
-        const list = loadConfigs();
+        const list = loadConfigs().slice();  // 캐시 복사 후 수정 (저장 성공 시 반영)
         // 중복 이름 검사 — 수정 시 자기 자신(원래 이름)은 제외
         if (list.some((c) => c.name === name && c.name !== origName)) {
           window.Toast.show("이미 있는 이름입니다", "error");
@@ -738,7 +804,9 @@
         } else {
           list.push(entry);
         }
-        window.Store.set(CONFIG_KEY, JSON.stringify(list));
+        try { await persistConfigs(list); }
+        catch (e) { window.Toast.show("Chat설정 저장 실패", "error"); return; }
+        configs = list;
         refreshConfigs(name);
         // 위험 패턴은 차단하지 않고 경고만 (저장은 진행) — PoC, 작성자는 신뢰된 테스터
         const warns = userPromptWarnings(promptEl.value);

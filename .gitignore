@@ -13,6 +13,9 @@ wheels/
 config.yaml
 wallets/
 
+# 메뉴별 Chat설정 파일 저장(런타임 사용자 상태) — DB별/메뉴별 JSON
+chat_configs/
+
 # region 별 model 후보 (환경별 파일) — 추적 템플릿은 models.txt.example, 실제 파일은 무시
 models.txt
 
