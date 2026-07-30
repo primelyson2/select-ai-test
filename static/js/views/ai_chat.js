@@ -322,7 +322,7 @@
       teams = MOCK_TEAMS.slice();
     }
 
-    let multiTurn = true;   // Multi Turn 활성/비활성 상태 (기본 ON)
+    let multiTurn = false;   // Multi Turn 활성/비활성 상태 (기본 OFF)
     let convId = "";        // Multi Turn ON 시 유지되는 conversation_id
 
     const panel = document.createElement("div");
@@ -577,7 +577,7 @@
       setMultiTurn(!multiTurn);
       convId = "";  // 모드 전환 시 대화 컨텍스트 초기화 (다음 전송부터 새 conversation)
     });
-    setMultiTurn(multiTurn);  // 기본 ON — 토글 UI(색상/노브) 초기 상태 동기화
+    setMultiTurn(multiTurn);  // 기본 OFF — 토글 UI(색상/노브) 초기 상태 동기화
 
     panel.querySelector("#chat-new").addEventListener("click", resetChat);
 
