@@ -281,6 +281,7 @@
         <div class="modal-header">
           <h2>Thinking 과정 <span class="muted" style="font-weight:400; font-size:var(--fs-sm);">conv_id: ${window.escapeHtml(convId)}</span></h2>
           <div class="row" style="gap:var(--space-2);">
+            <button class="btn btn-ghost" id="thk-refresh" type="button">↻ 새로고침</button>
             <button class="btn btn-ghost" id="thk-copy" type="button" disabled>복사</button>
             <button class="btn btn-ghost" id="thk-close" type="button">✕</button>
           </div>
@@ -299,30 +300,37 @@
 
     const body = backdrop.querySelector("#thk-body");
     const copyBtn = backdrop.querySelector("#thk-copy");
+    const refreshBtn = backdrop.querySelector("#thk-refresh");
     let thinking = { rows: [], error: null };
-    if (preThinking && (preThinking.rows || preThinking.error)) {
-      // 전송 응답에 동봉된 데이터 즉시 사용 (왕복 없음)
-      thinking = preThinking;
-    } else {
-      try {
-        const data = await window.API.get(`/api/agents/conversations/${encodeURIComponent(convId)}/timeline`);
-        thinking = data.thinking || { rows: [], error: null };
-      } catch (e) {
-        if (backdrop.isConnected) body.innerHTML = '<div class="empty-state muted">Thinking 조회 실패</div>';
-        return;
-      }
-    }
-    if (!backdrop.isConnected) return;
-    renderThinkingInto(body, thinking);
 
-    const rows = thinking.rows || [];
-    if (rows.length) {
-      copyBtn.disabled = false;
-      copyBtn.addEventListener("click", async () => {
-        const ok = await copyToClipboard(buildThinkingText(rows));
-        window.Toast.show(ok ? `Thinking ${rows.length}단계 복사됨` : "복사 실패", ok ? "success" : "error");
-      });
+    // forceFetch=false 면 전송 응답 동봉 데이터(preThinking) 우선, true(새로고침)면 항상 서버 재조회.
+    async function load(forceFetch) {
+      body.innerHTML = '<div class="empty-state"><span class="spinner"></span> 조회 중...</div>';
+      if (!forceFetch && preThinking && (preThinking.rows || preThinking.error)) {
+        thinking = preThinking;  // 왕복 없이 즉시 사용
+      } else {
+        try {
+          const data = await window.API.get(`/api/agents/conversations/${encodeURIComponent(convId)}/timeline`);
+          thinking = data.thinking || { rows: [], error: null };
+        } catch (e) {
+          if (backdrop.isConnected) body.innerHTML = '<div class="empty-state muted">Thinking 조회 실패</div>';
+          return;
+        }
+      }
+      if (!backdrop.isConnected) return;
+      renderThinkingInto(body, thinking);
+      copyBtn.disabled = !(thinking.rows && thinking.rows.length);
     }
+
+    copyBtn.addEventListener("click", async () => {
+      const rows = thinking.rows || [];
+      if (!rows.length) return;
+      const ok = await copyToClipboard(buildThinkingText(rows));
+      window.Toast.show(ok ? `Thinking ${rows.length}단계 복사됨` : "복사 실패", ok ? "success" : "error");
+    });
+    refreshBtn.addEventListener("click", () => load(true));  // 서버에서 최신 thinking 재조회
+
+    await load(false);
   }
 
   async function render() {
@@ -346,7 +354,10 @@
     }
 
     let multiTurn = true;   // Multi Turn 활성/비활성 상태 (이 메뉴는 기본 ON)
+    let resetOnAnswer = true; // 정상답변 시 conversation 초기화 여부 (기본 ON, 세션 기본값)
     let convId = "";        // Multi Turn ON 시 유지되는 conversation_id
+    let lastConvId = "";    // 정상답변으로 방금 초기화된 직전 conversation_id (이어서 질문 복원용)
+    let editable = true;    // 선택된 Chat설정의 'Chat화면에서 수정가능여부' (false 면 토글 잠금)
 
     const panel = document.createElement("div");
     panel.className = "panel chat-panel";
@@ -360,6 +371,11 @@
         </div>
         <div class="row" style="gap:var(--space-3); align-items:center;">
           <button class="btn btn-ghost" id="ctl-new">＋ 새 대화</button>
+          <label style="color:var(--text-muted); font-size:var(--fs-sm);">정상답변시 대화초기화</label>
+          <button class="switch" id="ctl-reset-onanswer" type="button"
+            role="switch" aria-checked="true" title="정상답변 후 대화 초기화(새 conversation). Multi Turn ON 일 때만 활성화됩니다.">
+            <span class="switch-knob"></span>
+          </button>
           <label style="color:var(--text-muted); font-size:var(--fs-sm);">Multi Turn</label>
           <button class="switch" id="ctl-multiturn" type="button"
             role="switch" aria-checked="false" title="Multi Turn 대화 컨텍스트 유지 여부">
@@ -379,12 +395,24 @@
         <textarea id="ctl-input" rows="1" placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
         <button class="btn btn-primary" id="ctl-send">전송</button>
       </div>
+      <div class="chat-continue-row" id="ctl-continue-row"
+           style="display:none; justify-content:flex-end; align-items:center; gap:6px; padding:4px var(--space-4); font-size:var(--fs-sm); color:var(--text-muted);">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+          이어서 질문하기
+          <input type="checkbox" id="ctl-continue" style="margin:0;" />
+        </label>
+      </div>
     `;
     main.appendChild(panel);
 
     const messagesEl = panel.querySelector("#ctl-messages");
     const inputEl = panel.querySelector("#ctl-input");
     const sendBtn = panel.querySelector("#ctl-send");
+    // '이어서 질문하기' — 정상답변 초기화 직후 노출, 체크 시 직전 conversation 유지
+    const continueRow = panel.querySelector("#ctl-continue-row");
+    const continueChk = panel.querySelector("#ctl-continue");
+    continueChk.addEventListener("change", () => { convId = continueChk.checked ? lastConvId : ""; });
+    function hideContinue() { continueRow.style.display = "none"; continueChk.checked = false; }
 
     let busy = false;
 
@@ -630,13 +658,15 @@
       addMessage("user", text);
       inputEl.value = "";
       autoGrow();
+      hideContinue();  // 전송 시작 — 이전 '이어서 질문하기' 행 정리(convId 는 이미 확정됨)
 
       const typing = addTyping();
       try {
-        // 대화 id 확보 — 이어가기(멀티턴 + 직전 id)면 재사용, 아니면 선생성.
+        // 대화 id 확보 — convId 가 있으면(멀티턴 연속 / HITL 유지 / '이어서 질문하기' 체크로 복원) 재사용, 아니면 선생성.
+        // 정상답변 초기화 시 convId 는 "" 가 되며, '이어서 질문하기' 를 체크해야만 직전 id 로 복원된다.
         // 선생성해 두면 "..." 처리 중에도 그 옆에 Thinking 링크를 붙일 수 있다(모든 메시지 대상).
         // 선생성 실패 시엔 "" 로 두어 백엔드가 내부 생성(기존 동작, 링크만 생략).
-        let convForTurn = (multiTurn && convId) ? convId : "";
+        let convForTurn = convId || "";
         if (!convForTurn) {
           try {
             const c = await window.API.post("/api/chat_tl/conversation", {});
@@ -674,9 +704,12 @@
         // 사용자의 후속 답변(번호/'기본값으로')이 같은 대화로 이어져 resume 되게 한다(멀티턴 OFF 여도 유지).
         // HITL 되묻기 감지 — HITL 메시지에는 instruction 상 "HITL" 문자열이 포함된다(그것만으로 판별).
         const isHitl = !results.length && !!res.answer && res.answer.includes("HITL");
-        if (allOk) {
+        // 정상답변 초기화는 '정상답변시 대화초기화' 스위치(resetOnAnswer)가 켜졌을 때만 적용한다.
+        if (allOk && resetOnAnswer) {
+          lastConvId = res.conversation_id || "";
           convId = "";
           debug.conv_reset = true;
+          debug.show_continue = true;  // '새 대화로 시작합니다'(conv_reset)가 뜰 때만 '이어서 질문하기' 노출
         } else if (isHitl && res.conversation_id) {
           convId = res.conversation_id;
         }
@@ -688,6 +721,8 @@
           const prefix = res.error ? `⚠ ${res.error}\n\n` : "";
           addMessage("bot", prefix + (res.answer || "(빈 응답)"), debug);
         }
+        // 정상답변 초기화(새 대화 안내)가 뜬 경우에만 '이어서 질문하기' 체크박스 노출(해제 상태)
+        if (debug.show_continue) { continueChk.checked = false; continueRow.style.display = "flex"; }
       } catch (e) {
         typing.remove();
         addMessage("bot", "오류: " + errMsg(e, "전송 실패"), {
@@ -704,6 +739,7 @@
     function resetChat() {
       messagesEl.innerHTML = "";
       convId = "";  // 새 대화 → conversation 초기화
+      hideContinue();
       addMessage("bot", GREETING);
     }
 
@@ -717,16 +753,43 @@
     });
     // Multi Turn 토글 — ON 이면 .on 클래스로 색상/노브 위치가 바뀐다.
     const multiTurnBtn = panel.querySelector("#ctl-multiturn");
+    // 정상답변시 대화초기화 토글 — Multi Turn 과 동일한 switch 형태. Multi Turn ON 일 때만 활성.
+    const resetBtn = panel.querySelector("#ctl-reset-onanswer");
+    function setResetOnAnswer(val) {
+      resetOnAnswer = !!val;
+      resetBtn.setAttribute("aria-checked", resetOnAnswer ? "true" : "false");
+      resetBtn.classList.toggle("on", resetOnAnswer);
+    }
+    function syncResetEnabled() {
+      // 초기화 스위치는 Multi Turn ON 이고 '수정가능'일 때만 활성(회색 비활성 처리).
+      const on = multiTurn && editable;
+      resetBtn.disabled = !on;
+      resetBtn.style.opacity = on ? "" : "0.4";
+      resetBtn.style.pointerEvents = on ? "" : "none";
+    }
+    // 'Chat화면에서 수정가능여부'(editable) 에 따라 토글 잠금/해제
+    function applyLocks() {
+      multiTurnBtn.disabled = !editable;
+      multiTurnBtn.style.opacity = editable ? "" : "0.4";
+      multiTurnBtn.style.pointerEvents = editable ? "" : "none";
+      syncResetEnabled();
+    }
+    resetBtn.addEventListener("click", () => {
+      if (!resetBtn.disabled) setResetOnAnswer(!resetOnAnswer);
+    });
     function setMultiTurn(val) {
       multiTurn = !!val;
       multiTurnBtn.setAttribute("aria-checked", multiTurn ? "true" : "false");
       multiTurnBtn.classList.toggle("on", multiTurn);
+      syncResetEnabled();  // Multi Turn 상태에 따라 초기화 스위치 활성/비활성 동기화
     }
     multiTurnBtn.addEventListener("click", () => {
       setMultiTurn(!multiTurn);
       convId = "";  // 모드 전환 시 대화 컨텍스트 초기화 (다음 전송부터 새 conversation)
+      hideContinue();
     });
-    setMultiTurn(multiTurn);  // 기본 ON — 토글 UI(색상/노브) 초기 상태 동기화
+    setResetOnAnswer(resetOnAnswer);  // 기본 ON — 스위치 초기 상태 동기화
+    setMultiTurn(multiTurn);          // 기본 ON — 토글 UI + 초기화 스위치 활성 상태 동기화
 
     panel.querySelector("#ctl-new").addEventListener("click", resetChat);
 
@@ -775,6 +838,18 @@
     };
     initConfigs();  // 서버에서 Chat설정 로드(+최초 이관) 후 드롭다운 렌더
 
+    // Chat설정 선택 시 그 설정의 초기값(정상답변초기화/Multi Turn/수정가능여부)을 화면 토글에 반영
+    function applySelectedConfig() {
+      const c = loadConfigs().find((x) => x.name === configSel.value);
+      editable = c ? (c.editable !== false) : true;  // 미선택(placeholder)이면 편집 가능 기본
+      if (c) {
+        setMultiTurn(c.multiTurn !== false);
+        setResetOnAnswer(c.resetOnAnswer !== false);
+      }
+      applyLocks();
+    }
+    configSel.addEventListener("change", applySelectedConfig);
+
     // 추가 — 빈 팝업을 열어 새 설정을 입력받아 저장
     configAddBtn.addEventListener("click", () => {
       openConfigModal("add", {
@@ -809,6 +884,14 @@
             <div class="stack-sm">
               <label>Chat설정</label>
               <input type="text" id="cfg-name" placeholder="설정 이름" />
+            </div>
+            <div class="stack-sm">
+              <label>conversation id 초기값설정</label>
+              <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;"><input type="checkbox" id="cfg-reset" /> 정상답변시 대화초기화</label>
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;"><input type="checkbox" id="cfg-multiturn" /> Multi Turn</label>
+                <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:400;"><input type="checkbox" id="cfg-editable" /> Chat화면에서 수정가능여부</label>
+              </div>
             </div>
             <div class="stack-sm">
               <label>Team</label>
@@ -851,10 +934,17 @@
       const nameEl = backdrop.querySelector("#cfg-name");
       const varsEl = backdrop.querySelector("#cfg-variables");
       const promptEl = backdrop.querySelector("#cfg-prompt");
+      const resetChkEl = backdrop.querySelector("#cfg-reset");
+      const mtChkEl = backdrop.querySelector("#cfg-multiturn");
+      const editChkEl = backdrop.querySelector("#cfg-editable");
       nameEl.value = cfg.name || "";
       teamSel.value = cfg.team || "";
       varsEl.value = cfg.variables || "";
       promptEl.value = cfg.userPrompt || "";
+      // 초기값 3종 — 기존 설정에 필드가 없으면 기본 true (하위호환)
+      resetChkEl.checked = cfg.resetOnAnswer !== false;
+      mtChkEl.checked = cfg.multiTurn !== false;
+      editChkEl.checked = cfg.editable !== false;
 
       backdrop.querySelector("#cfg-close").addEventListener("click", close);
       backdrop.querySelector("#cfg-cancel").addEventListener("click", close);
@@ -876,7 +966,8 @@
           window.Toast.show("이미 있는 이름입니다", "error");
           return;
         }
-        const entry = { name, team: teamSel.value, variables: varsEl.value, userPrompt: promptEl.value };
+        const entry = { name, team: teamSel.value, variables: varsEl.value, userPrompt: promptEl.value,
+          resetOnAnswer: resetChkEl.checked, multiTurn: mtChkEl.checked, editable: editChkEl.checked };
         if (mode === "edit") {
           const idx = list.findIndex((c) => c.name === origName);
           if (idx >= 0) list[idx] = entry; else list.push(entry);
@@ -887,6 +978,7 @@
         catch (e) { window.Toast.show("Chat설정 저장 실패", "error"); return; }
         configs = list;
         refreshConfigs(name);
+        applySelectedConfig();  // 방금 저장/선택된 설정의 초기값을 화면 토글에 반영
         // 위험 패턴은 차단하지 않고 경고만 (저장은 진행) — PoC, 작성자는 신뢰된 테스터
         const warns = userPromptWarnings(promptEl.value);
         if (warns.length) {
