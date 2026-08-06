@@ -71,8 +71,17 @@
     try { rows = await window.API.get("/api/agents/team-history?" + qs.toString()); }
     catch (e) { host.innerHTML = `<div class="empty-state muted">${window.escapeHtml(errMsg(e, "실행 내역 조회 실패"))}</div>`; return; }
     host.innerHTML = "";
+    rows = rows || [];
     const cntEl = document.getElementById("ah-count");
-    if (cntEl) cntEl.textContent = (rows || []).length;  // 실제 로드된 건수로 라벨 갱신
+    if (cntEl) cntEl.textContent = rows.length;  // 실제 로드된 건수로 라벨 갱신
+    // 각 실행(team_exec_id)의 피드백(👍/👎) 배지 맵 — 실패해도 목록은 그대로 표시.
+    const ids = rows.map((r) => r.team_exec_id).filter(Boolean);
+    if (ids.length) {
+      try {
+        const fbMap = await window.API.post("/api/feedback/by-execs", { ids });
+        rows.forEach((r) => { r.feedback = fbMap[r.team_exec_id] || null; });
+      } catch (e) { /* 배지 없이 진행 */ }
+    }
     host.appendChild(window.SimpleTable.create(
       [
         { key: "start_date", label: "시작시각", headerAlign: "center" },
@@ -80,12 +89,104 @@
         { key: "question", label: "질문" },
         { key: "state", label: "상태", headerAlign: "center", align: "center" },
         { key: "elapsed_ms", label: "소요(ms)", headerAlign: "center", align: "right", format: nf },
+        // 피드백 열: 뱃지 클릭 → 피드백 popup(행 클릭의 상세 모달과 분리, stopPropagation).
+        { key: "feedback", label: "피드백", headerAlign: "center", align: "center", format: (v, row) => feedbackBadge(row) },
         { key: "conversation_id", label: "conversation_id" },
       ],
-      rows || [],
+      rows,
       { className: "keep-case", onRowClick: (row) => showTraceModal(row),
         emptyText: "조회된 실행 내역이 없습니다." }
     ));
+  }
+
+  // 목록 '피드백' 열 뱃지 — 클릭 시 피드백 popup(상세 모달 아님). onSaved 로 뱃지만 갱신.
+  function feedbackBadge(row) {
+    const span = document.createElement("span");
+    span.style.cursor = "pointer";
+    const paint = (fb) => {
+      span.textContent = fb && fb.rating ? (fb.rating === "GOOD" ? "👍" : "👎") : "—";
+      span.title = fb && fb.reason ? fb.reason : "클릭하여 피드백 등록/수정";
+    };
+    paint(row.feedback);
+    span.addEventListener("click", (e) => {
+      e.stopPropagation();  // 행 클릭(상세 모달 showTraceModal) 방지
+      openFeedbackModal(row, (newFb) => { row.feedback = newFb; paint(newFb); });
+    });
+    return span;
+  }
+
+  // 피드백 popup — 신규 등록·수정 공용(업서트). 진입 시 기존 값 로드.
+  async function openFeedbackModal(row, onSaved) {
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" style="width:480px; max-width:94vw;">
+        <div class="modal-header">
+          <h2>답변 피드백 <span class="muted" style="font-size:var(--fs-sm);">${window.escapeHtml(row.team_name || "")}</span></h2>
+          <button class="btn btn-ghost" id="fb-close">✕</button>
+        </div>
+        <div class="modal-body stack">
+          <div class="muted" style="font-size:var(--fs-sm); white-space:pre-wrap;">${window.escapeHtml(row.question || "")}</div>
+          <div class="row" style="gap:8px;">
+            <button class="btn btn-ghost" id="fb-good" type="button">👍 좋음</button>
+            <button class="btn btn-ghost" id="fb-bad" type="button">👎 나쁨</button>
+          </div>
+          <label style="font-size:var(--fs-sm);">의견(사유)</label>
+          <textarea id="fb-reason" rows="4" placeholder="의견(선택)" style="width:100%;"></textarea>
+          <div class="row end" style="gap:8px;">
+            <button class="btn btn-ghost" id="fb-del" type="button" style="display:none;">삭제</button>
+            <button class="btn btn-ghost" id="fb-cancel" type="button">닫기</button>
+            <button class="btn btn-primary" id="fb-save" type="button">저장</button>
+          </div>
+        </div>
+      </div>`;
+    const close = () => { backdrop.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+    backdrop.querySelector("#fb-close").addEventListener("click", close);
+    backdrop.querySelector("#fb-cancel").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(backdrop);
+
+    let rating = null;  // 'GOOD' | 'BAD'
+    const goodBtn = backdrop.querySelector("#fb-good");
+    const badBtn = backdrop.querySelector("#fb-bad");
+    const reason = backdrop.querySelector("#fb-reason");
+    const delBtn = backdrop.querySelector("#fb-del");
+    const paint = () => {
+      // 선택 표시: btn-ghost(투명)를 빼고 btn-primary 로 교체(공존 시 ghost 가 배경을 이김).
+      goodBtn.className = "btn " + (rating === "GOOD" ? "btn-primary" : "btn-ghost");
+      badBtn.className = "btn " + (rating === "BAD" ? "btn-primary" : "btn-ghost");
+    };
+    goodBtn.addEventListener("click", () => { rating = "GOOD"; paint(); });
+    badBtn.addEventListener("click", () => { rating = "BAD"; paint(); });
+
+    // 기존 값 로드(있으면 수정 모드)
+    try {
+      const fb = await window.API.get("/api/feedback/" + encodeURIComponent(row.team_exec_id));
+      if (fb && fb.rating) { rating = fb.rating; reason.value = fb.reason || ""; delBtn.style.display = "inline-block"; paint(); }
+    } catch (e) { /* 미평가 상태 유지 */ }
+
+    backdrop.querySelector("#fb-save").addEventListener("click", async () => {
+      if (!rating) { window.Toast.show("좋음/나쁨을 선택하세요", "warn"); return; }
+      try {
+        await window.API.post("/api/feedback", {
+          team_exec_id: row.team_exec_id, conversation_id: row.conversation_id,
+          rating, reason: reason.value,
+        });
+        window.Toast.show("피드백을 저장했습니다", "success");
+        if (onSaved) onSaved({ rating, reason: reason.value });
+        close();
+      } catch (e) { window.Toast.show(errMsg(e, "피드백 저장 실패"), "error"); }
+    });
+    delBtn.addEventListener("click", async () => {
+      try {
+        await window.API.delete("/api/feedback/" + encodeURIComponent(row.team_exec_id));
+        window.Toast.show("피드백을 삭제했습니다", "success");
+        if (onSaved) onSaved(null);
+        close();
+      } catch (e) { window.Toast.show(errMsg(e, "피드백 삭제 실패"), "error"); }
+    });
   }
 
   // 행 클릭 → 상세 모달. Tab2 의 3영역을 재사용하기 위해 동일 ID 컨테이너를 만든다.
@@ -171,19 +272,39 @@
       suggestBtn.addEventListener("click", () => window.AgentTrace.openAgentSuggestModal(teamName, thinkingText));
       analyzeBtn.addEventListener("click", () => window.AgentTrace.openThinkingAnalyzeModal(teamName, thinkingText));
     }
-    // Thinking 복사 — AI Agent Team Test 의 [복사] 와 동일 동작(thinking 단계 전체를 텍스트로).
+    // Thinking 복사 — thinking 단계 전체 + 맨 하단에 사용자 feedback 을 함께 복사.
+    // feedback 은 아래 async 로 조회해 fbFooter 를 갱신하므로, 클릭 시점의 최신 값을 읽는다.
     const copyBtn = backdrop.querySelector("#ah-think-copy");
+    let fbFooter = "\n\n[사용자 feedback]\n평가: 미평가\n사유: (없음)";
     if (copyBtn) {
-      copyBtn.disabled = !thinkingText;
+      copyBtn.disabled = false;  // thinking 이 없어도 feedback 푸터는 복사 가능
       copyBtn.addEventListener("click", async () => {
-        if (!thinkingText) { window.Toast.show("복사할 thinking 단계가 없습니다", "warn"); return; }
-        const ok = await window.AgentTrace.copyToClipboard(thinkingText);
+        const ok = await window.AgentTrace.copyToClipboard((thinkingText || "") + fbFooter);
         window.Toast.show(
           ok ? `Thinking ${thinkingRows.length}단계 복사됨` : "복사 실패 — 직접 선택해 복사하세요",
           ok ? "success" : "error",
         );
       });
     }
+
+    // 사용자 feedback — Thinking 패널 맨 하단에 표시 + 복사 푸터(fbFooter) 갱신.
+    (async () => {
+      let ratingLabel = "미평가", reasonText = "";
+      try {
+        const fb = await window.API.get("/api/feedback/" + encodeURIComponent(row.team_exec_id));
+        if (fb && fb.rating) { ratingLabel = fb.rating === "GOOD" ? "좋음" : "나쁨"; reasonText = fb.reason || ""; }
+      } catch (e) { /* 미평가 유지 */ }
+      fbFooter = `\n\n[사용자 feedback]\n평가: ${ratingLabel}\n사유: ${reasonText || "(없음)"}`;
+      const thinkHost = backdrop.querySelector("#at-thinking");
+      if (thinkHost && backdrop.isConnected) {
+        const box = document.createElement("div");
+        box.id = "at-user-feedback";
+        box.className = "chat-debug";
+        box.style.marginTop = "10px";
+        box.textContent = `🗣 사용자 feedback — 평가: ${ratingLabel}` + (reasonText ? ` · 사유: ${reasonText}` : "");
+        thinkHost.appendChild(box);
+      }
+    })();
   }
 
   // timeline 엔드포인트엔 최종결과(result)가 없으므로 raw_logs 에서 파생한다.

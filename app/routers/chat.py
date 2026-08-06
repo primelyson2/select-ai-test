@@ -122,8 +122,26 @@ async def chat_send(payload: dict, database: str = Depends(current_db)) -> dict:
         logger.warning("chat timeline build failed: db=%s conv=%s: %s",
                        database, conv_id, first_line(exc))
 
+    # 이 답변(= 방금 RUN_TEAM 실행)의 team_exec_id — 프런트가 답변별 피드백 키로 사용.
+    # 실패해도 답변은 그대로 반환(피드백은 부가 기능).
+    team_exec_id = ""
+    try:
+        row = await db.fetch_one(
+            database,
+            "SELECT team_exec_id FROM ("
+            " SELECT team_exec_id FROM USER_AI_AGENT_TEAM_HISTORY "
+            " WHERE conversation_id = :cid ORDER BY start_date DESC) WHERE ROWNUM = 1",
+            cid=conv_id,
+        )
+        if row:
+            team_exec_id = row.get("team_exec_id") or ""
+    except Exception as exc:
+        logger.warning("chat team_exec_id lookup failed: db=%s conv=%s: %s",
+                       database, conv_id, first_line(exc))
+
     return {
         "conversation_id": conv_id,
+        "team_exec_id": team_exec_id,
         "answer": answer or "",
         "elapsed_ms": elapsed_ms,
         "timeline": extras.get("timeline", []),

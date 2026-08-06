@@ -965,3 +965,27 @@ INSERT INTO T_ANALYSIS_PERSONA (PERSONA_NAME, DESCRIPTION, PROMPT_TMPL) VALUES
  '아래 데이터를 경영진 보고용으로 3줄 이내로 요약하라. 숫자 근거를 포함하고 한국어로 답하라.');
 COMMIT;
 ```
+
+## 답변 Feedback 용 테이블 (`T_AICHAT_FEEDBACK`)
+
+메뉴 **Select AI Test - AI Chat** 의 각 답변에 남기는 **좋음/나쁨 + 사유** 피드백을 저장합니다. **Agent History**
+목록의 [피드백] 열·팝업, Agent 실행 상세의 Thinking 하단 표시/복사에도 같은 테이블을 씁니다. 키는 **team_exec_id
+(= RUN_TEAM 1회 = 답변 1회) 단위**라 멀티턴에서도 답변별로 구분되고, Agent History 목록 행과 1:1 매핑됩니다.
+(Select AI 자체 `DBMS_CLOUD_AI.FEEDBACK`(NL2SQL 학습)과는 **무관한 앱 레벨 기능**입니다.)
+
+- **접속 사용자 스키마에 생성**합니다(앱은 스키마 접두사 없이 조회 — 접속 사용자가 소유). `CREATE TABLE` 권한/쿼터 필요.
+- 앱이 각 피드백 API 진입 시 `CREATE TABLE IF NOT EXISTS`(23ai)로 **자동 생성**하므로 아래 DDL 을 수동 실행하지 않아도 됩니다
+  (권한만 있으면 됨). 참고·수동 생성용으로 DDL 을 남깁니다.
+
+```sql
+CREATE TABLE IF NOT EXISTS T_AICHAT_FEEDBACK (
+    ID              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 자동 증가 PK
+    TEAM_EXEC_ID    VARCHAR2(64)  NOT NULL,   -- 답변(=RUN_TEAM 실행) 식별자 = 관리 단위(UNIQUE)
+    CONVERSATION_ID VARCHAR2(64),             -- 참조/그룹용(멀티턴 묶기)
+    RATING          VARCHAR2(10)  NOT NULL,   -- 'GOOD' | 'BAD'
+    REASON          VARCHAR2(4000),           -- 사유(선택)
+    INS_DTM         TIMESTAMP DEFAULT SYSTIMESTAMP,
+    MOD_DTM         TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT UQ_AICHAT_FEEDBACK UNIQUE (TEAM_EXEC_ID)
+);
+```

@@ -434,9 +434,87 @@
         info.textContent = "🔄 정상 답변으로 대화가 초기화되었습니다 — 다음 질문은 새 conversation 으로 시작합니다";
         msg.appendChild(info);
       }
+      // 답변 피드백(좋음/나쁨 + 사유) — bot 답변이고 team_exec_id 가 있을 때만. 새 답변은 미평가 상태.
+      if (role === "bot" && debug && debug.team_exec_id) {
+        msg.appendChild(buildFeedbackRow(debug));
+      }
       messagesEl.appendChild(msg);
       scrollToBottom();
       return msg;
+    }
+
+    // 답변 아래 피드백 컨트롤: 👍 좋음 / 👎 나쁨 토글 + 사유(접이식) + 저장/삭제.
+    // 저장은 업서트(POST /api/feedback), 삭제는 DELETE. team_exec_id 당 1건.
+    function buildFeedbackRow(debug) {
+      const wrap = document.createElement("div");
+      wrap.className = "chat-debug chat-feedback";
+      let rating = null;  // 'GOOD' | 'BAD'
+
+      const label = document.createElement("span");
+      label.textContent = "이 답변 평가: ";
+      const goodBtn = document.createElement("button");
+      const badBtn = document.createElement("button");
+      const saveBtn = document.createElement("button");
+      const delBtn = document.createElement("button");
+      [goodBtn, badBtn, saveBtn, delBtn].forEach((b) => { b.type = "button"; b.className = "btn btn-ghost btn-mini"; });
+      goodBtn.textContent = "👍 좋음";
+      badBtn.textContent = "👎 나쁨";
+      saveBtn.textContent = "저장";
+      delBtn.textContent = "삭제";
+      saveBtn.style.display = "none";
+      delBtn.style.display = "none";
+
+      const reason = document.createElement("textarea");
+      reason.className = "chat-feedback-reason";
+      reason.rows = 2;
+      reason.placeholder = "사유(선택)";
+      reason.style.display = "none";
+      reason.style.width = "100%";
+      reason.style.marginTop = "6px";
+
+      const status = document.createElement("span");
+      status.className = "muted";
+      status.style.marginLeft = "6px";
+
+      function paint() {
+        // 선택 표시: btn-ghost(투명)를 빼고 btn-primary 로 교체해야 배경색이 보인다
+        // (CSS 상 .btn-ghost 가 .btn-primary 뒤라 두 클래스 공존 시 ghost 가 이김).
+        goodBtn.className = "btn btn-mini " + (rating === "GOOD" ? "btn-primary" : "btn-ghost");
+        badBtn.className = "btn btn-mini " + (rating === "BAD" ? "btn-primary" : "btn-ghost");
+        reason.style.display = rating ? "block" : "none";
+        saveBtn.style.display = rating ? "inline-block" : "none";
+      }
+      goodBtn.addEventListener("click", () => { rating = rating === "GOOD" ? null : "GOOD"; paint(); });
+      badBtn.addEventListener("click", () => { rating = rating === "BAD" ? null : "BAD"; paint(); });
+
+      saveBtn.addEventListener("click", async () => {
+        if (!rating) { window.Toast.show("좋음/나쁨을 선택하세요", "warn"); return; }
+        try {
+          await window.API.post("/api/feedback", {
+            team_exec_id: debug.team_exec_id, conversation_id: debug.conversation_id,
+            rating, reason: reason.value,
+          });
+          status.textContent = "저장됨";
+          delBtn.style.display = "inline-block";
+          window.Toast.show("피드백을 저장했습니다", "success");
+        } catch (e) { window.Toast.show(errMsg(e, "피드백 저장 실패"), "error"); }
+      });
+      delBtn.addEventListener("click", async () => {
+        try {
+          await window.API.delete("/api/feedback/" + encodeURIComponent(debug.team_exec_id));
+          rating = null; reason.value = ""; status.textContent = ""; delBtn.style.display = "none"; paint();
+          window.Toast.show("피드백을 삭제했습니다", "success");
+        } catch (e) { window.Toast.show(errMsg(e, "피드백 삭제 실패"), "error"); }
+      });
+
+      wrap.appendChild(label);
+      wrap.appendChild(goodBtn);
+      wrap.appendChild(badBtn);
+      wrap.appendChild(saveBtn);
+      wrap.appendChild(delBtn);
+      wrap.appendChild(status);
+      wrap.appendChild(reason);
+      return wrap;
     }
 
     // 디버깅 정보 라인 — conversation_id / elapsed / team / multi turn.
@@ -571,6 +649,7 @@
         else if (!multiTurn) convId = "";
         const debug = {
           conversation_id: res.conversation_id,
+          team_exec_id: res.team_exec_id || "",  // 답변별 피드백 키
           elapsed_ms: res.elapsed_ms,
           team: cfg.team,
           multi_turn: multiTurn,
