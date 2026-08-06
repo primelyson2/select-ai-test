@@ -29,7 +29,7 @@
     const panel = document.createElement("div");
     panel.className = "panel";
     panel.innerHTML = `
-      <div class="panel-header"><h2>Agent 실행 내역 <span class="muted" style="font-size:var(--fs-sm);">USER_AI_AGENT_TEAM_HISTORY · 최신순 · 20건</span></h2>
+      <div class="panel-header"><h2>Agent 실행 내역 <span class="muted" style="font-size:var(--fs-sm);">USER_AI_AGENT_TEAM_HISTORY · 최신순 · 최근 <span id="ah-count">100</span>건</span></h2>
         <button class="btn btn-ghost" id="ah-reload" type="button">↻ 새로고침</button>
       </div>
       <div class="panel-body stack">
@@ -62,7 +62,7 @@
     const host = document.getElementById("ah-list");
     if (!host) return;
     const val = (id) => (document.getElementById(id)?.value || "").trim();
-    const qs = new URLSearchParams({ limit: "20" });
+    const qs = new URLSearchParams({ limit: "100" });
     if (val("ah-q")) qs.set("question", val("ah-q"));
     if (val("ah-start")) qs.set("start", val("ah-start"));
     if (val("ah-end")) qs.set("end", val("ah-end"));
@@ -71,6 +71,8 @@
     try { rows = await window.API.get("/api/agents/team-history?" + qs.toString()); }
     catch (e) { host.innerHTML = `<div class="empty-state muted">${window.escapeHtml(errMsg(e, "실행 내역 조회 실패"))}</div>`; return; }
     host.innerHTML = "";
+    const cntEl = document.getElementById("ah-count");
+    if (cntEl) cntEl.textContent = (rows || []).length;  // 실제 로드된 건수로 라벨 갱신
     host.appendChild(window.SimpleTable.create(
       [
         { key: "start_date", label: "시작시각", headerAlign: "center" },
